@@ -97,7 +97,7 @@ REDIS_URL=redis://localhost:6379
 ## What's Next
 
 - **MPP (Stripe Machine Payments)** — payment channels for high-frequency agent interactions without per-tx fees
-- **Agent marketplace** — merchants list paywalled APIs, agents discover and pay autonomously
+- **Agent marketplace** — merchants list APIs, agents discover and pay autonomously
 - **Ethereum support** — same frontend, separate backend service for ERC-20 payments
 - **Spending policies** — contract accounts with per-agent USDC limits
 
