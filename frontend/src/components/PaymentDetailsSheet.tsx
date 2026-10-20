@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useLocale } from "next-intl";
 import { AnimatePresence, motion } from "framer-motion";
 import { useMerchantApiKey } from "@/lib/merchant-store";
@@ -44,6 +44,10 @@ export default function PaymentDetailsSheet({ paymentId, isOpen, onClose }: Paym
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"details" | "metadata" | "webhooks">("details");
+  // #1553 — refs for focus trap and initial focus management
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const tabRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
 
   useEffect(() => {
     if (!isOpen || !paymentId || !apiKey) return;
@@ -65,6 +69,81 @@ export default function PaymentDetailsSheet({ paymentId, isOpen, onClose }: Paym
     load();
   }, [paymentId, isOpen, apiKey]);
 
+  // #1553 — WCAG 2.1 AA focus trap: keep Tab/Shift+Tab cycling inside the sheet,
+  // move initial focus to the close button on open, and restore focus on close.
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    previousFocusRef.current = document.activeElement as HTMLElement | null;
+    // Focus the close button once the sheet mounts
+    const timer = setTimeout(() => closeButtonRef.current?.focus(), 50);
+    return () => {
+      clearTimeout(timer);
+      previousFocusRef.current?.focus();
+    };
+  }, [isOpen]);
+
+  // #1553 — trap Tab within the sheet
+  const trapFocus = useCallback((e: React.KeyboardEvent) => {
+    if (e.key !== "Tab" || !sheetRef.current) return;
+    const focusables = sheetRef.current.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }, []);
+
+  // #1556 — keyboard: Escape closes, Arrow Left/Right switch tabs,
+  // Home/End jump to first/last tab.
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      trapFocus(e);
+      const tabs = ["details", "metadata", "webhooks"] as const;
+      const idx = tabs.indexOf(activeTab);
+
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+        return;
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        const next = tabs[(idx + 1) % tabs.length];
+        setActiveTab(next);
+        tabRefs.current.get(next)?.focus();
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        const prev = tabs[(idx - 1 + tabs.length) % tabs.length];
+        setActiveTab(prev);
+        tabRefs.current.get(prev)?.focus();
+        return;
+      }
+      if (e.key === "Home") {
+        e.preventDefault();
+        setActiveTab(tabs[0]);
+        tabRefs.current.get(tabs[0])?.focus();
+        return;
+      }
+      if (e.key === "End") {
+        e.preventDefault();
+        setActiveTab(tabs[tabs.length - 1]);
+        tabRefs.current.get(tabs[tabs.length - 1])?.focus();
+      }
+    },
+    [activeTab, onClose, trapFocus],
+  );
+
   useEffect(() => {
     const onEsc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onEsc);
@@ -76,9 +155,14 @@ export default function PaymentDetailsSheet({ paymentId, isOpen, onClose }: Paym
       {isOpen && (
         <>
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            onClick={onClose} className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm" />
+            onClick={onClose} className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm" aria-hidden="true" />
 
           <motion.div
+            ref={sheetRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="payment-details-title"
+            onKeyDown={handleKeyDown}
             initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }}
             transition={{ type: "spring", damping: 28, stiffness: 220 }}
             className="fixed inset-y-0 right-0 z-50 flex w-full max-w-lg flex-col border-l border-[#E8E8E8] bg-white shadow-2xl"
@@ -86,21 +170,30 @@ export default function PaymentDetailsSheet({ paymentId, isOpen, onClose }: Paym
             {/* Header */}
             <div className="flex shrink-0 items-start justify-between border-b border-[#E8E8E8] px-6 py-5">
               <div className="flex flex-col gap-1">
-                <h2 className="text-lg font-bold text-[#0A0A0A]">Payment Details</h2>
+                <h2 id="payment-details-title" className="text-lg font-bold text-[#0A0A0A]">Payment Details</h2>
                 <code className="font-mono text-[10px] text-[#6B6B6B]">{paymentId}</code>
               </div>
-              <button onClick={onClose} className="rounded-xl border border-[#E8E8E8] p-2 text-[#6B6B6B] hover:bg-[#F5F5F5] hover:text-[#0A0A0A] transition-all">
-                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <button ref={closeButtonRef} onClick={onClose} aria-label="Close payment details"
+                className="rounded-xl border border-[#E8E8E8] p-2 text-[#6B6B6B] hover:bg-[#F5F5F5] hover:text-[#0A0A0A] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pluto-300)]">
+                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
             </div>
 
-            {/* Tabs */}
-            <div className="flex shrink-0 border-b border-[#E8E8E8] px-6">
+            {/* Tabs — roving tabindex with arrow-key navigation (#1556) */}
+            <div role="tablist" aria-label="Payment detail sections" className="flex shrink-0 border-b border-[#E8E8E8] px-6">
               {(["details", "metadata", "webhooks"] as const).map(tab => (
-                <button key={tab} onClick={() => setActiveTab(tab)}
-                  className={`relative px-4 py-3 text-[10px] font-bold uppercase tracking-widest transition-colors ${
+                <button
+                  key={tab}
+                  ref={(el) => { if (el) tabRefs.current.set(tab, el); }}
+                  role="tab"
+                  id={`tab-${tab}`}
+                  aria-selected={activeTab === tab}
+                  aria-controls={`panel-${tab}`}
+                  tabIndex={activeTab === tab ? 0 : -1}
+                  onClick={() => setActiveTab(tab)}
+                  className={`relative px-4 py-3 text-[10px] font-bold uppercase tracking-widest transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pluto-300)] focus-visible:ring-inset ${
                     activeTab === tab ? "text-[var(--pluto-600)]" : "text-[#6B6B6B] hover:text-[var(--pluto-500)]"
                   }`}>
                   {tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -110,13 +203,13 @@ export default function PaymentDetailsSheet({ paymentId, isOpen, onClose }: Paym
             </div>
 
             {/* Body */}
-            <div className="flex-1 overflow-y-auto p-6">
+            <div className="flex-1 overflow-y-auto p-6" role="tabpanel" id={`panel-${activeTab}`} aria-labelledby={`tab-${activeTab}`}>
               {loading ? (
-                <div className="flex h-40 items-center justify-center">
+                <div className="flex h-40 items-center justify-center" role="status" aria-label="Loading payment details">
                   <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#0A0A0A] border-t-transparent" />
                 </div>
               ) : error ? (
-                <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>
+                <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>
               ) : (
                 <>
                   {activeTab === "details" && payment && (
