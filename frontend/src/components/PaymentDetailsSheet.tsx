@@ -49,6 +49,9 @@ export default function PaymentDetailsSheet({ paymentId, isOpen, onClose }: Paym
     if (!isOpen || !paymentId || !apiKey) return;
     setLoading(true); setError(null); setPayment(null);
     const load = async () => {
+      // Optimistic state: cache the previous state for rollback on failure (#1555)
+      const prevPayment = payment;
+      const prevLogs = webhookLogs;
       try {
         const [pRes, lRes] = await Promise.all([
           fetch(`${API_URL}/api/payments/${paymentId}`, { headers: { "x-api-key": apiKey } }),
@@ -59,6 +62,9 @@ export default function PaymentDetailsSheet({ paymentId, isOpen, onClose }: Paym
         setPayment(pd.payment);
         if (lRes.ok) { const ld = await lRes.json(); setWebhookLogs(ld.logs || []); }
       } catch (err: unknown) {
+        // Rollback to previous state on network failure (#1555)
+        setPayment(prevPayment);
+        setWebhookLogs(prevLogs);
         setError(err instanceof Error ? err.message : "An error occurred");
       } finally { setLoading(false); }
     };
