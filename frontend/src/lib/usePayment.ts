@@ -1,16 +1,28 @@
 import { useState, useCallback } from "react";
-import {
-  getFreighterPublicKey,
-  signWithFreighter,
-  submitTransaction,
-} from "@/lib/freighter";
-import { buildPaymentTransaction } from "@/lib/stellar";
+import { submitTransaction } from "@/lib/freighter";
+import { buildPaymentTransaction, buildPathPaymentTransaction } from "@/lib/stellar";
+import type { WalletProvider } from "@/lib/wallet-types";
 
 interface PaymentParams {
   recipient: string;
   amount: string;
   assetCode: string;
   assetIssuer: string | null;
+  memo?: string | null;
+  memoType?: string | null;
+}
+
+interface PathPaymentParams {
+  recipient: string;
+  destAmount: string;
+  destAssetCode: string;
+  destAssetIssuer: string | null;
+  sendMax: string;
+  sendAssetCode: string;
+  sendAssetIssuer: string | null;
+  path: Array<{ asset_code: string; asset_issuer: string | null }>;
+  memo?: string | null;
+  memoType?: string | null;
 }
 
 interface UsePaymentReturn {
@@ -18,26 +30,32 @@ interface UsePaymentReturn {
   status: string | null;
   error: string | null;
   processPayment: (params: PaymentParams) => Promise<{ hash: string }>;
+  processPathPayment: (params: PathPaymentParams) => Promise<{ hash: string }>;
 }
 
 /**
- * Hook for processing payments with Freighter wallet
+ * Hook for processing payments with any WalletProvider.
+ *
+ * Pass the active provider returned by `useWallet()`. Falls back to a
+ * descriptive error when no provider is selected.
  */
-export function usePayment(): UsePaymentReturn {
+export function usePayment(provider: WalletProvider | null): UsePaymentReturn {
   const [isProcessing, setIsProcessing] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const processPayment = useCallback(
     async (params: PaymentParams): Promise<{ hash: string }> => {
+      if (!provider) throw new Error("No wallet provider selected");
+
       setIsProcessing(true);
       setStatus("Connecting to wallet...");
       setError(null);
 
       try {
-        // Get the public key from Freighter
-        setStatus("Requesting signature from wallet...");
-        const publicKey = await getFreighterPublicKey();
+        // Get the public key from the active provider
+        setStatus("Requesting account from wallet...");
+        const publicKey = await provider.getPublicKey();
 
         // Get network configuration
         const networkUrl =
@@ -55,15 +73,17 @@ export function usePayment(): UsePaymentReturn {
           amount: params.amount,
           assetCode: params.assetCode,
           assetIssuer: params.assetIssuer,
+          memo: params.memo,
+          memoType: params.memoType,
           horizonUrl: networkUrl,
           networkPassphrase,
         });
 
-        // Sign the transaction
+        // Sign with the active provider
         setStatus("Signing transaction...");
-        const { signedXDR } = await signWithFreighter(
+        const signedXDR = await provider.signTransaction(
           transactionXDR,
-          networkPassphrase
+          networkPassphrase,
         );
 
         // Submit the transaction
@@ -71,7 +91,7 @@ export function usePayment(): UsePaymentReturn {
         const result = await submitTransaction(
           signedXDR,
           networkUrl,
-          networkPassphrase
+          networkPassphrase,
         );
 
         setStatus("Payment completed successfully!");
@@ -86,7 +106,71 @@ export function usePayment(): UsePaymentReturn {
         setIsProcessing(false);
       }
     },
-    []
+    [provider],
+  );
+
+  const processPathPayment = useCallback(
+    async (params: PathPaymentParams): Promise<{ hash: string }> => {
+      if (!provider) throw new Error("No wallet provider selected");
+
+      setIsProcessing(true);
+      setStatus("Connecting to wallet...");
+      setError(null);
+
+      try {
+        setStatus("Requesting account from wallet...");
+        const publicKey = await provider.getPublicKey();
+
+        const networkUrl =
+          process.env.NEXT_PUBLIC_HORIZON_URL ||
+          "https://horizon-testnet.stellar.org";
+        const networkPassphrase =
+          process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE ||
+          "Test SDF Network ; September 2015";
+
+        setStatus("Building path payment transaction...");
+        const transactionXDR = await buildPathPaymentTransaction({
+          sourcePublicKey: publicKey,
+          destinationPublicKey: params.recipient,
+          sendMax: params.sendMax,
+          sendAssetCode: params.sendAssetCode,
+          sendAssetIssuer: params.sendAssetIssuer,
+          destAmount: params.destAmount,
+          destAssetCode: params.destAssetCode,
+          destAssetIssuer: params.destAssetIssuer,
+          path: params.path,
+          memo: params.memo,
+          memoType: params.memoType,
+          horizonUrl: networkUrl,
+          networkPassphrase,
+        });
+
+        setStatus("Signing transaction...");
+        const signedXDR = await provider.signTransaction(
+          transactionXDR,
+          networkPassphrase,
+        );
+
+        setStatus("Submitting transaction...");
+        const result = await submitTransaction(
+          signedXDR,
+          networkUrl,
+          networkPassphrase,
+        );
+
+        setStatus("Payment completed successfully!");
+        return result;
+      } catch (err) {
+        const errorMsg =
+          err instanceof Error ? err.message : "Unknown error occurred";
+        setError(errorMsg);
+        setStatus(null);
+        throw err;
+      } finally {
+        setIsProcessing(false);
+      }
+    },
+    [provider],
   );
 
   return {
@@ -94,5 +178,6 @@ export function usePayment(): UsePaymentReturn {
     status,
     error,
     processPayment,
+    processPathPayment,
   };
 }

@@ -6,6 +6,19 @@ export interface MerchantSession {
   exp: number;
 }
 
+export interface Merchant {
+  id: string;
+  email: string;
+  business_name: string;
+  notification_email: string;
+  merchant_settings?: {
+    send_success_emails?: boolean;
+  } | null;
+  api_key: string;
+  webhook_secret: string;
+  created_at: string;
+}
+
 /**
  * Decode the JWT payload without verifying the signature.
  * Verification happens server-side; here we only need the claims for UI state.
@@ -70,7 +83,7 @@ export async function login(
   password: string
 ): Promise<MerchantSession> {
   const apiUrl =
-    process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+    process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
   const res = await fetch(`${apiUrl}/api/auth/login`, {
     method: "POST",
@@ -83,14 +96,67 @@ export async function login(
     throw new Error(body.error ?? "Login failed");
   }
 
-  const { token } = await res.json();
+  const body = await res.json();
+  console.log("[auth] login response body:", body);
+  const token = body.token;
+  if (!token) throw new Error("No token in server response");
   saveToken(token);
 
+  // Also save merchant metadata if provided
+  if (body.merchant && typeof window !== "undefined") {
+    localStorage.setItem("merchant_metadata", JSON.stringify(body.merchant));
+  }
+
   const session = getSession();
+  console.log("[auth] parsed session:", session);
   if (!session) throw new Error("Invalid token received from server");
   return session;
 }
 
+export async function registerMerchant(
+  email: string,
+  business_name: string,
+  notification_email: string,
+  password: string,
+): Promise<{ message: string; token?: string; merchant: Merchant }> {
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+
+  const res = await fetch(`${apiUrl}/api/register-merchant`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, business_name, notification_email, password }),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? "Registration failed");
+  }
+
+  return await res.json();
+}
+
 export function logout(): void {
   clearToken();
+}
+
+export async function generateFirstApiKey(): Promise<string> {
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+  const token = getToken();
+
+  if (!token) throw new Error("No session token found");
+
+  const res = await fetch(`${apiUrl}/api/merchants/generate-api-key`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`
+    },
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? "Failed to generate API key");
+  }
+
+  const { api_key } = await res.json();
+  return api_key;
 }

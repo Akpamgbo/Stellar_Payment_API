@@ -1,0 +1,1606 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Stellar Payment API",
+    "version": "0.1.0",
+    "description": "API for creating and verifying Stellar network payments. Accept Stellar-based payments with simple links and status tracking.",
+    "contact": {
+      "name": "Stellar Payment API Support",
+      "url": "https://github.com/emdevelopa/Stellar_Payment_API"
+    },
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:4000",
+      "description": "API Server"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "API Key for authenticating merchant requests. Obtain this key when registering a merchant."
+      }
+    }
+  },
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Payments",
+      "description": "Payment creation and verification endpoints"
+    },
+    {
+      "name": "Merchants",
+      "description": "Merchant account and API key management"
+    },
+    {
+      "name": "Webhooks",
+      "description": "Webhook configuration and delivery logs"
+    },
+    {
+      "name": "Metrics",
+      "description": "Payment metrics and analytics"
+    }
+  ],
+  "paths": {
+    "/api/audit-logs": {
+      "get": {
+        "summary": "Get audit logs for the authenticated merchant",
+        "tags": [
+          "Audit"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "Page number (1-indexed)"
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            },
+            "description": "Number of results per page (max 100)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated audit logs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "logs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "total_count": {
+                      "type": "integer"
+                    },
+                    "total_pages": {
+                      "type": "integer"
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "links": {
+                      "type": "object",
+                      "properties": {
+                        "next": {
+                          "type": "string",
+                          "description": "URL to the next page"
+                        },
+                        "previous": {
+                          "type": "string",
+                          "description": "URL to the previous page"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key"
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "summary": "Login with email and password",
+        "tags": [
+          "Auth"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "email",
+                  "password"
+                ],
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful"
+          },
+          "401": {
+            "description": "Invalid credentials"
+          }
+        }
+      }
+    },
+    "/api/auth/verify": {
+      "post": {
+        "summary": "Verify a signed SEP-0010 challenge and issue session token",
+        "tags": [
+          "Auth"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "transaction"
+                ],
+                "properties": {
+                  "transaction": {
+                    "type": "string",
+                    "description": "Signed challenge transaction XDR"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authentication successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "token": {
+                      "type": "string",
+                      "description": "Session JWT token"
+                    },
+                    "merchant": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed"
+          }
+        }
+      }
+    },
+    "/api/register-merchant": {
+      "post": {
+        "summary": "Register a new merchant",
+        "tags": [
+          "Merchants"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "email"
+                ],
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "business_name": {
+                    "type": "string"
+                  },
+                  "notification_email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Optional free-form onboarding data (e.g. industry, country)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Merchant registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "merchant": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "409": {
+            "description": "Merchant already exists"
+          },
+          "429": {
+            "description": "Too many registration attempts"
+          }
+        }
+      }
+    },
+    "/api/rotate-key": {
+      "post": {
+        "summary": "Rotate the authenticated merchant's API key",
+        "tags": [
+          "Merchants"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "New API key issued; the old key is immediately invalidated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "api_key": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key header"
+          }
+        }
+      }
+    },
+    "/api/merchants/rotate-webhook-secret": {
+      "post": {
+        "summary": "Rotate the authenticated merchant's webhook signing secret",
+        "tags": [
+          "Merchants"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "grace_period_hours": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 168,
+                    "description": "Optional override for old-secret grace period in hours (default 24)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New webhook secret issued; old secret remains valid until expiry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "webhook_secret": {
+                      "type": "string"
+                    },
+                    "webhook_secret_old_expires_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "grace_period_hours": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/preview-receipt": {
+      "post": {
+        "summary": "Generate a preview HTML of the email receipt with custom branding",
+        "tags": [
+          "Merchants"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrandingConfig"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "HTML preview of the receipt",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/test-webhook": {
+      "post": {
+        "summary": "Send a test ping to a webhook URL",
+        "tags": [
+          "Merchants"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/webhook-settings": {
+      "get": {
+        "summary": "Retrieve current webhook URL and masked webhook secret",
+        "tags": [
+          "Merchants"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current webhook settings"
+          }
+        }
+      },
+      "put": {
+        "summary": "Update the merchant's webhook endpoint URL",
+        "tags": [
+          "Merchants"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "webhook_url": {
+                    "type": "string",
+                    "format": "uri"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Webhook URL updated"
+          },
+          "400": {
+            "description": "Validation error"
+          }
+        }
+      }
+    },
+    "/api/regenerate-webhook-secret": {
+      "post": {
+        "summary": "Regenerate the merchant's webhook signing secret",
+        "tags": [
+          "Merchants"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "New webhook secret issued"
+          },
+          "401": {
+            "description": "Missing or invalid x-api-key header"
+          }
+        }
+      }
+    },
+    "/api/merchants/generate-api-key": {
+      "post": {
+        "summary": "Generate an API key using session authentication",
+        "tags": [
+          "Merchants"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "New API key issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "api_key": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/merchants/rotate-api-key": {
+      "post": {
+        "summary": "Rotate API key with overlap period for seamless migration",
+        "tags": [
+          "Merchants"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "grace_period_hours": {
+                    "type": "integer",
+                    "description": "Hours the old key remains valid (0-168, default 24)",
+                    "default": 24
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New API key generated with old key overlap period"
+          }
+        }
+      }
+    },
+    "/api/merchants/api-key-status": {
+      "get": {
+        "summary": "Get current API key status and expiry information",
+        "tags": [
+          "Merchants"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "API key status information"
+          }
+        }
+      }
+    },
+    "/api/merchants/set-api-key-expiry": {
+      "put": {
+        "summary": "Set an expiry date for the current API key",
+        "tags": [
+          "Merchants"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "expires_at"
+                ],
+                "properties": {
+                  "expires_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "ISO 8601 datetime when the API key expires"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics/summary": {
+      "get": {
+        "summary": "Get monthly revenue summary grouped by asset",
+        "tags": [
+          "Metrics"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/metrics/revenue": {
+      "get": {
+        "summary": "Get aggregate revenue by asset",
+        "tags": [
+          "Metrics"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/metrics/volume": {
+      "get": {
+        "summary": "Get per-asset daily volume for a time range",
+        "tags": [
+          "Metrics"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/payments/{id}": {
+      "get": {
+        "summary": "Get detailed payment intent",
+        "description": "Returns the full payment record for the authenticated merchant. When status is \"completed\", a `stellar_tx` block is also included containing the on-chain tx_hash, ledger sequence, and timestamp sourced directly from Horizon.\n",
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Payment intent UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Payment detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "payment": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "amount": {
+                          "type": "number"
+                        },
+                        "asset": {
+                          "type": "string"
+                        },
+                        "asset_issuer": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "recipient": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "memo": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "memo_type": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "confirmed",
+                            "completed",
+                            "failed"
+                          ]
+                        },
+                        "tx_id": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "created_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "branding_config": {
+                          "type": "object",
+                          "nullable": true
+                        }
+                      }
+                    },
+                    "stellar_tx": {
+                      "nullable": true,
+                      "type": "object",
+                      "description": "Present only when status is \"completed\" and Horizon returns the transaction. null otherwise.\n",
+                      "properties": {
+                        "tx_hash": {
+                          "type": "string"
+                        },
+                        "ledger": {
+                          "type": "integer"
+                        },
+                        "timestamp": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorised — invalid or missing API key"
+          },
+          "404": {
+            "description": "Payment not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Soft delete a payment (preserves audit logs)",
+        "tags": [
+          "Payments"
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Payment ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Payment soft deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "payment_id": {
+                      "type": "string"
+                    },
+                    "deleted_at": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Payment not found"
+          },
+          "410": {
+            "description": "Payment already deleted"
+          }
+        }
+      }
+    },
+    "/api/create-payment": {
+      "post": {
+        "summary": "Create a new payment session request",
+        "tags": [
+          "Payments"
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional unique key for idempotent requests. Use UUID or request ID. Responses are cached for 24 hours."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "amount",
+                  "asset",
+                  "recipient"
+                ],
+                "properties": {
+                  "amount": {
+                    "type": "number",
+                    "description": "Payment amount (must be positive and at least 0.01 XLM for native payments)"
+                  },
+                  "asset": {
+                    "type": "string",
+                    "description": "Asset code (e.g. XLM, USDC)"
+                  },
+                  "asset_issuer": {
+                    "type": "string",
+                    "description": "Asset issuer (required for non-native assets)"
+                  },
+                  "recipient": {
+                    "type": "string",
+                    "description": "Stellar address of the recipient"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "memo": {
+                    "type": "string"
+                  },
+                  "memo_type": {
+                    "type": "string",
+                    "enum": [
+                      "text",
+                      "id",
+                      "hash",
+                      "return"
+                    ]
+                  },
+                  "webhook_url": {
+                    "type": "string"
+                  },
+                  "client_id": {
+                    "type": "string",
+                    "description": "Merchant-defined client/store identifier for segmentation"
+                  },
+                  "branding_overrides": {
+                    "type": "object",
+                    "properties": {
+                      "primary_color": {
+                        "type": "string",
+                        "example": "#5ef2c0"
+                      },
+                      "secondary_color": {
+                        "type": "string",
+                        "example": "#b8ffe2"
+                      },
+                      "background_color": {
+                        "type": "string",
+                        "example": "#050608"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Duplicate request — cached response returned from idempotency key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "payment_id": {
+                      "type": "string"
+                    },
+                    "payment_link": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Payment created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "payment_id": {
+                      "type": "string"
+                    },
+                    "payment_link": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "branding_config": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error or invalid Idempotency-Key"
+          },
+          "429": {
+            "description": "Too many requests"
+          }
+        }
+      }
+    },
+    "/api/payment-status/{id}": {
+      "get": {
+        "summary": "Get the status of a payment",
+        "tags": [
+          "Payments"
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Payment ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Payment details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "payment": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Payment not found"
+          }
+        }
+      }
+    },
+    "/api/stream/{id}": {
+      "get": {
+        "summary": "Subscribe to real-time status updates for a payment",
+        "tags": [
+          "Payments"
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Payment ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream"
+          }
+        }
+      }
+    },
+    "/api/verify-payment/{id}": {
+      "post": {
+        "summary": "Verify a payment on the Stellar network",
+        "tags": [
+          "Payments"
+        ]
+      }
+    },
+    "/api/payments": {
+      "get": {
+        "summary": "Get paginated list of payments for the authenticated merchant",
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "Page number (1-indexed)"
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            },
+            "description": "Number of results per page (max 100)"
+          },
+          {
+            "in": "query",
+            "name": "client_id",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter payments by merchant-defined client identifier"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated payments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "payments": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "total_count": {
+                      "type": "integer"
+                    },
+                    "total_pages": {
+                      "type": "integer"
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "links": {
+                      "type": "object",
+                      "properties": {
+                        "next": {
+                          "type": "string",
+                          "description": "URL to the next page"
+                        },
+                        "previous": {
+                          "type": "string",
+                          "description": "URL to the previous page"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key"
+          }
+        }
+      }
+    },
+    "/api/metrics/7day": {
+      "get": {
+        "summary": "Get 7-day rolling payment volume metrics",
+        "tags": [
+          "Metrics"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Daily volume data for past 7 days",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "date": {
+                            "type": "string",
+                            "description": "Date in YYYY-MM-DD format"
+                          },
+                          "volume": {
+                            "type": "number",
+                            "description": "Total payment amount for that day"
+                          },
+                          "count": {
+                            "type": "integer",
+                            "description": "Number of payments on that day"
+                          }
+                        }
+                      }
+                    },
+                    "total_volume": {
+                      "type": "number",
+                      "description": "Total volume across all 7 days"
+                    },
+                    "total_payments": {
+                      "type": "integer",
+                      "description": "Total payment count across all 7 days"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key"
+          }
+        }
+      }
+    },
+    "/api/payments/{id}/refund": {
+      "post": {
+        "summary": "Generate a refund transaction for a confirmed payment",
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Payment ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Refund transaction XDR",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "xdr": {
+                      "type": "string",
+                      "description": "Transaction XDR to sign and submit"
+                    },
+                    "hash": {
+                      "type": "string",
+                      "description": "Transaction hash"
+                    },
+                    "instructions": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Payment not eligible for refund"
+          },
+          "404": {
+            "description": "Payment not found"
+          }
+        }
+      }
+    },
+    "/api/payments/{id}/refund/confirm": {
+      "post": {
+        "summary": "Confirm a refund transaction has been submitted",
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Payment ID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "tx_hash"
+                ],
+                "properties": {
+                  "tx_hash": {
+                    "type": "string",
+                    "description": "Submitted refund transaction hash"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Refund confirmed"
+          },
+          "404": {
+            "description": "Payment not found"
+          }
+        }
+      }
+    },
+    "/api/anchor/sep24/deposit": {
+      "post": {
+        "summary": "Initiate a SEP-0024 hosted deposit (fiat → Stellar token)",
+        "description": "Starts an interactive deposit flow with a Stellar anchor (e.g. Circle, MoneyGram). Returns a URL the frontend should open in a popup — the anchor hosts the deposit form, so no bank details are ever sent to this API.\n",
+        "tags": [
+          "Anchor / SEP-0024"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "asset_code",
+                  "account"
+                ],
+                "properties": {
+                  "asset_code": {
+                    "type": "string",
+                    "description": "Stellar asset code to deposit (e.g. USDC, EURC)",
+                    "example": "USDC"
+                  },
+                  "account": {
+                    "type": "string",
+                    "description": "User's Stellar public key that will receive the tokens"
+                  },
+                  "amount": {
+                    "type": "number",
+                    "description": "Optional pre-fill amount for the deposit form"
+                  },
+                  "anchor_domain": {
+                    "type": "string",
+                    "description": "Anchor domain override (defaults to ANCHOR_DOMAIN env var)",
+                    "example": "testanchor.stellar.org"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Interactive deposit URL from the anchor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "example": "interactive_customer_info_needed"
+                    },
+                    "url": {
+                      "type": "string",
+                      "description": "Open this URL in a popup for the user to complete the deposit"
+                    },
+                    "id": {
+                      "type": "string",
+                      "description": "Anchor transaction ID — use this to poll /anchor/sep24/transaction/:id"
+                    },
+                    "anchor_domain": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required fields"
+          },
+          "500": {
+            "description": "ANCHOR_DOMAIN not configured"
+          },
+          "502": {
+            "description": "Anchor request failed"
+          }
+        }
+      }
+    },
+    "/api/anchor/sep24/withdraw": {
+      "post": {
+        "summary": "Initiate a SEP-0024 hosted withdrawal",
+        "tags": [
+          "Anchor / SEP-0024"
+        ]
+      }
+    },
+    "/api/anchor/sep24/transaction/{id}": {
+      "get": {
+        "summary": "Poll the status of a SEP-0024 anchor transaction",
+        "description": "Fetches the current status of a deposit or withdrawal transaction from an anchor.\n",
+        "tags": [
+          "Anchor / SEP-0024"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Anchor transaction ID returned from /deposit or /withdraw"
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "Endpoint is not enabled on this deployment"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Expose Prometheus metrics",
+        "description": "Returns the current state of Prometheus metrics for the application.",
+        "tags": [
+          "Monitoring"
+        ],
+        "responses": {
+          "200": {
+            "description": "Prometheus metrics formatted for scraping",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/stellar.toml": {
+      "get": {
+        "summary": "Get SEP-0001 stellar.toml for merchant",
+        "tags": [
+          "SEP-0001"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "merchant_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Merchant ID (optional, uses authenticated merchant if not provided)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SEP-0001 stellar.toml content",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Merchant not found"
+          },
+          "500": {
+            "description": "Failed to generate stellar.toml"
+          }
+        }
+      }
+    },
+    "/api/webhook-logs": {
+      "get": {
+        "summary": "Get webhook delivery logs for authenticated merchant",
+        "description": "Retrieve paginated webhook delivery logs for the authenticated merchant account using cursor-based pagination",
+        "tags": [
+          "Webhooks"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Pagination cursor (base64 encoded)"
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            },
+            "description": "Number of logs per page"
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "success",
+                "failure"
+              ]
+            },
+            "description": "Filter by success (2xx) or failure (non-2xx)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated webhook logs"
+          },
+          "401": {
+            "description": "Unauthorized - invalid or missing API key"
+          },
+          "500": {
+            "description": "Server error"
+          }
+        }
+      }
+    },
+    "/api/webhooks/test": {
+      "post": {
+        "summary": "Send a test webhook to the merchant's stored webhook URL",
+        "tags": [
+          "Webhooks"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/notifications": {
+      "get": {
+        "summary": "Get dashboard notifications",
+        "tags": [
+          "Notifications"
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/verify-x402": {
+      "post": {
+        "summary": "Verify a Stellar USDC payment for x402 access",
+        "tags": [
+          "x402"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "tx_hash",
+                  "expected_amount",
+                  "expected_recipient",
+                  "memo"
+                ],
+                "properties": {
+                  "tx_hash": {
+                    "type": "string"
+                  },
+                  "expected_amount": {
+                    "type": "string"
+                  },
+                  "expected_recipient": {
+                    "type": "string"
+                  },
+                  "memo": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Payment verified — access token returned"
+          },
+          "400": {
+            "description": "Payment verification failed"
+          },
+          "409": {
+            "description": "Transaction already used (replay attack)"
+          }
+        }
+      }
+    }
+  }
+}

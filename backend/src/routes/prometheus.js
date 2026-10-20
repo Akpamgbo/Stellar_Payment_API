@@ -1,0 +1,57 @@
+import express from "express";
+import { register } from "../lib/metrics.js";
+// Granular Payment Processor metrics live in their own registry (issue #1088)
+// and are merged into the scrape output below.
+import { paymentProcessorRegister } from "../lib/payment-processor-metrics.js";
+// Granular Trustline Manager metrics live in their own registry (issue #1043)
+// and are merged into the scrape output below.
+import { trustlineManagerRegister } from "../lib/trustline-manager-metrics.js";
+// Granular Path Payment Service metrics live in their own registry (issue #1048)
+// and are merged into the scrape output below.
+import { pathPaymentRegister } from "../lib/path-payment-metrics.js";
+// Payment Session Validator metrics live in their own registry (issue #1448)
+// and are merged into the scrape output below.
+import { paymentSessionValidatorRegister } from "../lib/payment-session-validator-metrics.js";
+// Exchange Rate Oracle Cache alert metrics live in their own registry (issue #1443)
+// and are merged into the scrape output below.
+import { exchangeRateOracleRegister } from "../lib/exchange-rate-oracle-telemetry.js";
+// Database Row-Level Security Service alert metrics live in their own registry (issue #1468)
+// and are merged into the scrape output below.
+import { dbRlsRegister } from "../lib/db-rls-telemetry.js";
+
+const router = express.Router();
+
+/**
+ * @swagger
+ * /metrics:
+ *   get:
+ *     summary: Expose Prometheus metrics
+ *     description: Returns the current state of Prometheus metrics for the application, including granular payment processor, trustline manager, path payment, payment session validator, exchange-rate oracle cache and database row-level security metrics.
+ *     tags: [Monitoring]
+ *     responses:
+ *       200:
+ *         description: Prometheus metrics formatted for scraping
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ */
+router.get("/metrics", async (req, res) => {
+  try {
+    const scrapes = await Promise.all([
+      register.metrics(),
+      paymentProcessorRegister.metrics(),
+      trustlineManagerRegister.metrics(),
+      pathPaymentRegister.metrics(),
+      paymentSessionValidatorRegister.metrics(),
+      exchangeRateOracleRegister.metrics(),
+      dbRlsRegister.metrics(),
+    ]);
+    res.set("Content-Type", register.contentType);
+    res.end(scrapes.join("\n"));
+  } catch (err) {
+    res.status(500).end(err);
+  }
+});
+
+export default router;

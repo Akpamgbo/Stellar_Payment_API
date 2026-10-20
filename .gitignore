@@ -5,6 +5,7 @@
 node_modules/
 npm-debug.log*
 yarn-debug.log*
+yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
@@ -27,3 +28,67 @@ out/
 *.sqlite3
 
 supabase/.temp/
+
+scripts/*.py
+*.py
+task.md
+issueTmeplate.md
+vercelerror.md
+betterui.md
+hackathon.md
+resources.md
+x402_stellar_guide.md
+prompt.md
+backend_check_fail.md
+frontend_check_fail.md
+issue.md
+pr.md
+
+# ── Test artifacts ────────────────────────────────────────────────
+# Playwright / Vitest output directories
+test-results/
+**/test-results/
+playwright-report/
+**/playwright-report/
+
+# Visual regression snapshots generated at runtime
+**/*.spec.ts-snapshots/
+**/*.spec.tsx-snapshots/
+**/e2e/*.spec.ts-snapshots/
+**/e2e/*.spec.tsx-snapshots/
+
+# Test snapshots (Jest / Vitest inline snapshots)
+**/__snapshots__/
+**/snap_*.js
+*.snap
+
+# ── Build / compile artifacts ─────────────────────────────────────
+# TypeScript incremental build cache — no value in version control
+tsconfig.tsbuildinfo
+**/tsconfig.tsbuildinfo
+
+# ── Misc output files ─────────────────────────────────────────────
+output.txt
+**/output.txt
+verify_output.txt
+**/verify_output.txt
+
+# ── Logs ──────────────────────────────────────────────────────────
+backend/logs/
+*.log
+
+# ── Lock files (keep pnpm-lock.yaml, ignore others) ───────────────
+# Root-level package-lock from accidental npm installs
+package-lock.json!.env.sample
+
+# ── Additional ignores ────────────────────────────────────────────
+**/__snapshots__/
+**/*.snap
+*.swp
+*.swo
+*.tmp
+*.temp
+logs/
+**/logs/
+.env.local
+.env.*.local
