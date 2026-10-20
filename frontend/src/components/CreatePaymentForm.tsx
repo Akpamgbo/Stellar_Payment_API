@@ -22,6 +22,8 @@ import {
   type CreatedPayment,
 } from "@/lib/create-payment-flow";
 import { useLocalStorage } from "@/hooks/useLocalStorage";
+import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { KeyboardShortcutsHelp } from "./KeyboardShortcutsHelp";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -630,6 +632,52 @@ export default function CreatePaymentForm() {
     setRetryAfter(0);
   };
 
+  // #1566 - Keyboard shortcuts for improved navigation and accessibility
+  const keyboardShortcuts = [
+    {
+      key: "Enter",
+      ctrl: true,
+      meta: true, // Cmd on Mac, Ctrl on Windows/Linux
+      handler: (e: KeyboardEvent) => {
+        e.preventDefault();
+        if (paymentFlow.status !== "submitting" && paymentFlow.status !== "success") {
+          const formEl = document.querySelector("form");
+          if (formEl) {
+            formEl.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+          }
+        }
+      },
+      description: "Submit payment",
+    },
+    {
+      key: "k",
+      ctrl: true,
+      meta: true,
+      handler: (e: KeyboardEvent) => {
+        e.preventDefault();
+        if (paymentFlow.status !== "submitting") {
+          handleReset();
+          toast.success("Form cleared");
+        }
+      },
+      description: "Clear form",
+    },
+    {
+      key: "Escape",
+      handler: (e: KeyboardEvent) => {
+        if (paymentFlow.status === "success") {
+          e.preventDefault();
+          handleReset();
+        }
+      },
+      description: "Close success modal",
+    },
+  ];
+
+  useKeyboardShortcuts(keyboardShortcuts, {
+    enabled: hydrated && !!apiKey,
+  });
+
   const handleTrustedAddressSelect = (addressId: string) => {
     setSelectedTrustedAddress(addressId);
     if (addressId) {
@@ -751,6 +799,14 @@ export default function CreatePaymentForm() {
               {error}
             </motion.div>
           )}
+
+          {/* Keyboard shortcuts help (#1566) */}
+          <div className="flex items-center justify-between">
+            <div className="text-xs text-slate-500">
+              Tip: Use keyboard shortcuts for faster navigation
+            </div>
+            <KeyboardShortcutsHelp shortcuts={keyboardShortcuts} position="bottom" />
+          </div>
 
           <div className="flex flex-col gap-4">
             {/* Amount */}
