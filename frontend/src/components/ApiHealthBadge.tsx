@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 
 type ExtendedHealthStatus = "loading" | "healthy" | "error";
 
 export default function ApiHealthBadge() {
   const [status, setStatus] = useState<ExtendedHealthStatus>("loading");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [tooltipVisible, setTooltipVisible] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
 
   const checkHealth = async () => {
     try {
@@ -17,7 +19,7 @@ export default function ApiHealthBadge() {
       const services = data?.services ?? {};
       const dbOk = services.database === "ok";
       const horizonOk = services.horizon === "ok";
-      const apiReachable = true; // If we got an HTTP response, backend is reachable.
+      const apiReachable = true;
       const healthy = apiReachable;
 
       if (healthy) {
@@ -42,26 +44,37 @@ export default function ApiHealthBadge() {
 
   useEffect(() => {
     checkHealth();
-    // Re-check every 60 seconds
     const interval = setInterval(checkHealth, 60000);
     return () => {
       clearInterval(interval);
     };
   }, []);
 
-  const handleRefresh = async (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+  const handleRefresh = useCallback(async () => {
     if (status === "loading") return;
-
-    // Optimistic Update: Immediately transition to visual checking/loading state
     setStatus("loading");
     setErrorMsg(null);
-
-    // satisfy with a micro-delay so the animation feels responsive and interactive
     await new Promise((resolve) => setTimeout(resolve, 400));
     await checkHealth();
-  };
+  }, [status]);
+
+  // #1551 — keyboard: Enter/Space activate the button (native), Escape blurs,
+  // and "r" triggers a manual re-check when focused. Tooltip is toggled on
+  // focus so keyboard users can read it without hovering.
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setTooltipVisible(false);
+        buttonRef.current?.blur();
+        return;
+      }
+      if (e.key === "r" || e.key === "R") {
+        e.preventDefault();
+        void handleRefresh();
+      }
+    },
+    [handleRefresh],
+  );
 
   const config = {
     loading: {
@@ -86,12 +99,16 @@ export default function ApiHealthBadge() {
 
   return (
     <button
+      ref={buttonRef}
       type="button"
-      onClick={handleRefresh}
+      onClick={() => void handleRefresh()}
+      onKeyDown={handleKeyDown}
+      onFocus={() => setTooltipVisible(true)}
+      onBlur={() => setTooltipVisible(false)}
       disabled={status === "loading"}
       aria-live="polite"
       aria-describedby="api-health-tooltip"
-      aria-label={`API Health Status: ${status === "healthy" ? "Active" : status === "error" ? "Down" : "Checking"} ${errorMsg ? `- ${errorMsg}` : ""}. Click to re-check.`}
+      aria-label={`API Health Status: ${status === "healthy" ? "Active" : status === "error" ? "Down" : "Checking"} ${errorMsg ? `- ${errorMsg}` : ""}. Press Enter or R to re-check.`}
       className="group relative flex items-center gap-2 rounded-full border border-[var(--border-subtle)] bg-white px-3.5 py-2 transition-all duration-300 hover:border-[var(--pluto-300)] hover:bg-[var(--pluto-50)]/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[var(--pluto-300)] active:scale-[0.97] disabled:opacity-85 disabled:cursor-not-allowed cursor-pointer"
     >
       <div className="relative flex h-2 w-2 items-center justify-center">
@@ -106,17 +123,18 @@ export default function ApiHealthBadge() {
         {status === "healthy" ? "API Active" : status === "error" ? "API Down" : "Checking"}
       </span>
 
-      {/* Tooltip */}
+      {/* Tooltip — visible on hover and keyboard focus */}
       <div
         id="api-health-tooltip"
         role="tooltip"
-        className="pointer-events-none absolute left-1/2 top-full z-50 mt-4 -translate-x-1/2 whitespace-nowrap rounded-2xl border border-[var(--pluto-100)] bg-white/95 px-5 py-3.5 text-[10px] font-bold uppercase tracking-[0.2em] text-[var(--text-primary)] opacity-0 shadow-[0_20px_50px_rgba(0,0,0,0.12)] backdrop-blur-md transition-all duration-300 group-hover:opacity-100 group-hover:translate-y-1.5 group-focus-visible:opacity-100 group-focus-visible:translate-y-1.5"
+        className={`pointer-events-none absolute left-1/2 top-full z-50 mt-4 -translate-x-1/2 whitespace-nowrap rounded-2xl border border-[var(--pluto-100)] bg-white/95 px-5 py-3.5 text-[10px] font-bold uppercase tracking-[0.2em] text-[var(--text-primary)] shadow-[0_20px_50px_rgba(0,0,0,0.12)] backdrop-blur-md transition-all duration-300 ${
+          tooltipVisible || "group-hover:opacity-100 group-hover:translate-y-1.5"
+        } ${tooltipVisible ? "opacity-100 translate-y-1.5" : "opacity-0"}`}
       >
         <p className="text-center leading-none">{config.label}</p>
         {(errorMsg && status !== "loading") && (
           <p className="mt-2 text-[9px] text-[var(--text-secondary)] lowercase tracking-normal font-medium text-center">{errorMsg}</p>
         )}
-        {/* Arrow */}
         <div className="absolute bottom-full left-1/2 h-2.5 w-2.5 -translate-x-1/2 translate-y-1.5 rotate-45 border-l border-t border-[var(--pluto-100)] bg-white/95" />
       </div>
     </button>
