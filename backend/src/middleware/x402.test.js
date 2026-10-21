@@ -31,6 +31,10 @@ import {
   getDeadLetterQueueStats,
   clearDeadLetterQueue,
   isRetryableX402Error,
+  acquireX402Lock,
+  releaseX402Lock,
+  withX402Lock,
+  resetLocalLocksForTests,
 } from "./x402.js";
 import { createFakeRedis } from "../../tests/helpers/fake-redis.js";
 
@@ -45,9 +49,24 @@ function makeReq(headers = {}, query = {}) {
 }
 
 function makeRes() {
+  const listeners = {};
   const res = {
     _status: null,
     _json: null,
+    on: vi.fn((event, handler) => {
+      listeners[event] = listeners[event] || [];
+      listeners[event].push(handler);
+      return res;
+    }),
+    once: vi.fn((event, handler) => {
+      listeners[event] = listeners[event] || [];
+      listeners[event].push(handler);
+      return res;
+    }),
+    emit: (event, ...args) => {
+      const handlers = listeners[event] || [];
+      for (const h of handlers) h(...args);
+    },
   };
   res.status = vi.fn((code) => {
     res._status = code;
@@ -64,6 +83,7 @@ describe("x402 Middleware", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetX402CacheForTests();
+    resetLocalLocksForTests();
     process.env.X402_JWT_SECRET = JWT_SECRET;
   });
 
@@ -256,6 +276,7 @@ describe("x402 Middleware", () => {
 
       expect(next1).toHaveBeenCalledTimes(1);
       expect(spyJwtVerify).toHaveBeenCalledTimes(1);
+      res1.emit("finish");
 
       // Second request: Cache hit -> jwt.verify skipped!
       const req2 = makeReq({ "x-payment-token": token });
@@ -266,6 +287,7 @@ describe("x402 Middleware", () => {
       expect(next2).toHaveBeenCalledTimes(1);
       expect(spyJwtVerify).toHaveBeenCalledTimes(1); // Still 1!
       expect(req2.x402.tx_hash).toBe("hash-middleware-cache");
+      res2.emit("finish");
 
       spyJwtVerify.mockRestore();
     });
@@ -334,7 +356,7 @@ describe("x402 Middleware", () => {
       });
 
       it("recovers eligible pending items via recoverDeadLetterQueue", async () => {
-        const id = await enqueueDeadLetter({
+        await enqueueDeadLetter({
           operationType: "payment_reconcile",
           payload: { paymentId: "pay-1" },
           error: new Error("temporary network issue"),
@@ -354,7 +376,7 @@ describe("x402 Middleware", () => {
       });
 
       it("marks items as exhausted poison pills after exceeding max attempts", async () => {
-        const id = await enqueueDeadLetter({
+        await enqueueDeadLetter({
           operationType: "failing_op",
           payload: { data: "test" },
           error: new Error("persistent error"),
@@ -364,7 +386,6 @@ describe("x402 Middleware", () => {
           throw new Error("still failing");
         });
 
-        // Run recovery 5 times
         for (let i = 0; i < 5; i++) {
           await recoverDeadLetterQueue({ handler: failingHandler, maxDlqRetries: 3 });
         }
@@ -372,6 +393,113 @@ describe("x402 Middleware", () => {
         const stats = getDeadLetterQueueStats();
         expect(stats.exhausted).toBe(1);
       });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Issue #1629: Concurrency Control and Atomic Transaction Handling
+  // -------------------------------------------------------------------------
+  describe("Concurrency Control and Atomic Transaction Handling (Issue #1629)", () => {
+    it("acquires and releases distributed lock in Redis", async () => {
+      const fakeRedis = createFakeRedis();
+      const lockKey = "tx-sample-01";
+
+      const first = await acquireX402Lock(lockKey, 5000, { redisClient: fakeRedis });
+      expect(first.acquired).toBe(true);
+      expect(first.token).toBeDefined();
+
+      // Second acquire with same key must fail (mutual exclusion)
+      const second = await acquireX402Lock(lockKey, 5000, { redisClient: fakeRedis });
+      expect(second.acquired).toBe(false);
+
+      // Release with correct token
+      const released = await releaseX402Lock(lockKey, first.token, { redisClient: fakeRedis });
+      expect(released).toBe(true);
+
+      // Can now be acquired again
+      const third = await acquireX402Lock(lockKey, 5000, { redisClient: fakeRedis });
+      expect(third.acquired).toBe(true);
+    });
+
+    it("prevents releasing a lock with a mismatched token", async () => {
+      const fakeRedis = createFakeRedis();
+      const lockKey = "tx-sample-02";
+
+      const lock = await acquireX402Lock(lockKey, 5000, { redisClient: fakeRedis });
+      expect(lock.acquired).toBe(true);
+
+      const wrongRelease = await releaseX402Lock(lockKey, "wrong-token", { redisClient: fakeRedis });
+      expect(wrongRelease).toBe(false);
+    });
+
+    it("falls back to in-process locking when Redis is unavailable", async () => {
+      const lockKey = "local-lock-01";
+
+      const first = await acquireX402Lock(lockKey, 5000, { redisClient: null });
+      expect(first.acquired).toBe(true);
+
+      const second = await acquireX402Lock(lockKey, 5000, { redisClient: null });
+      expect(second.acquired).toBe(false);
+
+      const released = await releaseX402Lock(lockKey, first.token, { redisClient: null });
+      expect(released).toBe(true);
+
+      const third = await acquireX402Lock(lockKey, 5000, { redisClient: null });
+      expect(third.acquired).toBe(true);
+    });
+
+    it("withX402Lock runs callback and automatically releases lock", async () => {
+      const fakeRedis = createFakeRedis();
+      let ran = false;
+
+      await withX402Lock("atomic-op", async () => {
+        ran = true;
+      }, { redisClient: fakeRedis });
+
+      expect(ran).toBe(true);
+
+      // Lock should have been released
+      const reacquire = await acquireX402Lock("atomic-op", 5000, { redisClient: fakeRedis });
+      expect(reacquire.acquired).toBe(true);
+    });
+
+    it("rejects concurrent middleware requests for same token with 409 Conflict", async () => {
+      const fakeRedis = createFakeRedis();
+      const token = jwt.sign({ tx_hash: "concurrency-tx-1" }, JWT_SECRET);
+
+      const middleware = x402Middleware({
+        amount: "0.01",
+        recipient: VALID_STELLAR_KEY,
+        redisClient: fakeRedis,
+        enableConcurrencyControl: true,
+      });
+
+      // Request 1 arrives and is in-flight (has not emitted "finish" or "close")
+      const req1 = makeReq({ "x-payment-token": token });
+      const res1 = makeRes();
+      const next1 = vi.fn();
+      await middleware(req1, res1, next1);
+      expect(next1).toHaveBeenCalledTimes(1);
+
+      // Request 2 arrives concurrently with identical token while req1 is still active
+      const req2 = makeReq({ "x-payment-token": token });
+      const res2 = makeRes();
+      const next2 = vi.fn();
+      await middleware(req2, res2, next2);
+
+      expect(next2).not.toHaveBeenCalled();
+      expect(res2.status).toHaveBeenCalledWith(409);
+      expect(res2._json.code).toBe("X402_TRANSACTION_IN_PROGRESS");
+
+      // Once Request 1 finishes, subsequent requests can be processed
+      res1.emit("finish");
+
+      const req3 = makeReq({ "x-payment-token": token });
+      const res3 = makeRes();
+      const next3 = vi.fn();
+      await middleware(req3, res3, next3);
+      expect(next3).toHaveBeenCalledTimes(1);
+      res3.emit("finish");
     });
   });
 });

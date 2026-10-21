@@ -55,6 +55,13 @@ export const MAX_MEMO_PREFIX_LENGTH = 20;
 /** Default token cache TTL in seconds */
 export const DEFAULT_TOKEN_CACHE_TTL_SEC = 300;
 
+/** Default lock TTL in milliseconds */
+export const DEFAULT_LOCK_TTL_MS = 10_000;
+
+/** Compare-and-delete Lua script for atomic lock release */
+export const RELEASE_LOCK_SCRIPT =
+  'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end';
+
 // ---------------------------------------------------------------------------
 // Prometheus Telemetry & Metrics
 // ---------------------------------------------------------------------------
@@ -116,6 +123,160 @@ export const x402DlqSize = getOrCreateMetric(client.Gauge, {
   name: "x402_dlq_size",
   help: "Current number of pending items in x402 Dead-Letter Queue",
 });
+
+export const x402LockAcquiredTotal = getOrCreateMetric(client.Counter, {
+  name: "x402_lock_acquired_total",
+  help: "Total number of x402 concurrency locks acquired",
+  labelNames: ["lock_type"],
+});
+
+export const x402LockContentionTotal = getOrCreateMetric(client.Counter, {
+  name: "x402_lock_contention_total",
+  help: "Total number of x402 concurrency lock contention conflicts (409)",
+  labelNames: ["asset"],
+});
+
+export const x402LockReleasedTotal = getOrCreateMetric(client.Counter, {
+  name: "x402_lock_released_total",
+  help: "Total number of x402 concurrency locks released",
+  labelNames: ["lock_type"],
+});
+
+// ---------------------------------------------------------------------------
+// Concurrency Control & Distributed Locking
+// ---------------------------------------------------------------------------
+
+/** In-process lock fallback map: key -> { token, expiresAt } */
+const localLocks = new Map();
+
+/**
+ * Reset local lock map for testing.
+ */
+export function resetLocalLocksForTests() {
+  localLocks.clear();
+}
+
+/**
+ * Acquire a mutual-exclusion lock for an x402 transaction or token.
+ *
+ * @param {string} key - Lock identifier
+ * @param {number} [ttlMs=10000] - Lock expiration in ms
+ * @param {object} [opts]
+ * @param {object} [opts.redisClient]
+ * @returns {Promise<{ acquired: boolean, token: string|null }>}
+ */
+export async function acquireX402Lock(key, ttlMs = DEFAULT_LOCK_TTL_MS, opts = {}) {
+  const lockKey = `lock:x402:${key}`;
+  const token = randomUUID();
+  const now = Date.now();
+
+  // 1. Try Redis lock
+  try {
+    const redis = opts.redisClient || (await connectRedisClient());
+    if (redis && redis.isOpen) {
+      let result = null;
+      if (typeof redis.sendCommand === "function") {
+        result = await redis.sendCommand([
+          "SET",
+          lockKey,
+          token,
+          "NX",
+          "PX",
+          String(ttlMs),
+        ]);
+      } else {
+        result = await redis.set(lockKey, token, { NX: true, PX: ttlMs });
+      }
+
+      if (result === "OK" || result === true) {
+        x402LockAcquiredTotal.inc({ lock_type: "redis" });
+        return { acquired: true, token };
+      }
+      return { acquired: false, token: null };
+    }
+  } catch (err) {
+    logger?.debug?.({ err: err.message }, "x402: redis lock acquire failed, using local fallback");
+  }
+
+  // 2. In-process fallback lock
+  const existing = localLocks.get(lockKey);
+  if (existing && existing.expiresAt > now) {
+    return { acquired: false, token: null };
+  }
+
+  localLocks.set(lockKey, { token, expiresAt: now + ttlMs });
+  x402LockAcquiredTotal.inc({ lock_type: "memory" });
+  return { acquired: true, token };
+}
+
+/**
+ * Release a mutual-exclusion lock atomically.
+ *
+ * @param {string} key - Lock identifier
+ * @param {string} token - Lock ownership token
+ * @param {object} [opts]
+ * @param {object} [opts.redisClient]
+ * @returns {Promise<boolean>} True if released, false otherwise
+ */
+export async function releaseX402Lock(key, token, opts = {}) {
+  if (!token) return false;
+  const lockKey = `lock:x402:${key}`;
+  let released = false;
+
+  // 1. Try Redis compare-and-delete
+  try {
+    const redis = opts.redisClient || (await connectRedisClient());
+    if (redis && redis.isOpen) {
+      let res;
+      if (typeof redis.sendCommand === "function") {
+        res = await redis.sendCommand(["EVAL", RELEASE_LOCK_SCRIPT, "1", lockKey, token]);
+      } else if (typeof redis.eval === "function") {
+        res = await redis.eval(RELEASE_LOCK_SCRIPT, { keys: [lockKey], arguments: [token] });
+      }
+      if (res === 1 || res === "1") {
+        x402LockReleasedTotal.inc({ lock_type: "redis" });
+        released = true;
+      }
+    }
+  } catch (err) {
+    logger?.debug?.({ err: err.message }, "x402: redis lock release failed");
+  }
+
+  // 2. Local fallback lock release
+  const local = localLocks.get(lockKey);
+  if (local && local.token === token) {
+    localLocks.delete(lockKey);
+    x402LockReleasedTotal.inc({ lock_type: "memory" });
+    released = true;
+  }
+
+  return released;
+}
+
+/**
+ * Run a callback protected by an atomic x402 lock.
+ *
+ * @param {string} key
+ * @param {Function} fn
+ * @param {object} [opts]
+ * @returns {Promise<any>}
+ */
+export async function withX402Lock(key, fn, opts = {}) {
+  const ttlMs = opts.ttlMs ?? DEFAULT_LOCK_TTL_MS;
+  const lock = await acquireX402Lock(key, ttlMs, opts);
+  if (!lock.acquired) {
+    const err = new Error("x402 transaction lock in progress");
+    err.code = "X402_TRANSACTION_IN_PROGRESS";
+    err.status = 409;
+    throw err;
+  }
+
+  try {
+    return await fn();
+  } finally {
+    await releaseX402Lock(key, lock.token, opts);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Dead-Letter Queue (DLQ) & Retry Logic
@@ -358,11 +519,12 @@ export function clearDeadLetterQueue() {
 }
 
 /**
- * Reset caches, DLQ, and metrics for testing.
+ * Reset caches, DLQ, locks, and metrics for testing.
  */
 export function resetX402CacheForTests() {
   memoryTokenCache.clear();
   clearDeadLetterQueue();
+  resetLocalLocksForTests();
 }
 
 /**
@@ -372,11 +534,12 @@ export function getX402Telemetry() {
   return {
     inMemoryCacheSize: memoryTokenCache.size,
     dlqStats: getDeadLetterQueueStats(),
+    localLocksCount: localLocks.size,
   };
 }
 
 /**
- * Generate a SHA-256 hash for a token to safely use as a cache key.
+ * Generate a SHA-256 hash for a token to safely use as a cache/lock key.
  *
  * @param {string} token
  * @returns {string} Hex hash string
@@ -489,6 +652,8 @@ export function validateX402Config(config) {
     redisClient = null,
     cacheTtlSec = DEFAULT_TOKEN_CACHE_TTL_SEC,
     dlqOptions = null,
+    enableConcurrencyControl = true,
+    lockTtlMs = DEFAULT_LOCK_TTL_MS,
   } = config;
 
   // Validate amount
@@ -567,6 +732,8 @@ export function validateX402Config(config) {
     redisClient,
     cacheTtlSec: Number.isFinite(cacheTtlSec) && cacheTtlSec > 0 ? cacheTtlSec : DEFAULT_TOKEN_CACHE_TTL_SEC,
     dlqOptions: dlqOptions || DEFAULT_DLQ_RETRY_OPTIONS,
+    enableConcurrencyControl: Boolean(enableConcurrencyControl),
+    lockTtlMs: Number.isFinite(lockTtlMs) && lockTtlMs > 0 ? lockTtlMs : DEFAULT_LOCK_TTL_MS,
   };
 }
 
@@ -632,7 +799,7 @@ export function generatePaymentMemo(prefix, requestId) {
 
 /**
  * Create x402 middleware with comprehensive input validation, distributed Redis caching,
- * throughput telemetry, automated retry logic, and Dead-Letter Queue (DLQ) recovery.
+ * throughput telemetry, automated DLQ recovery, and atomic concurrency control.
  *
  * @param {object} config
  * @param {string} config.amount          - USDC amount required (e.g. "0.01")
@@ -644,6 +811,8 @@ export function generatePaymentMemo(prefix, requestId) {
  * @param {object} [config.redisClient]   - Injected Redis client
  * @param {number} [config.cacheTtlSec]   - TTL for cached tokens in seconds
  * @param {object} [config.dlqOptions]    - DLQ retry and recovery configuration
+ * @param {boolean} [config.enableConcurrencyControl=true] - Enable distributed concurrency lock
+ * @param {number} [config.lockTtlMs=10000] - Lock TTL in ms
  */
 export function x402Middleware(config) {
   const validatedConfig = validateX402Config(config);
@@ -656,6 +825,8 @@ export function x402Middleware(config) {
     enforceByDefault,
     redisClient,
     cacheTtlSec,
+    enableConcurrencyControl,
+    lockTtlMs,
   } = validatedConfig;
 
   const jwtSecret = process.env.X402_JWT_SECRET;
@@ -686,8 +857,34 @@ export function x402Middleware(config) {
     const resolvedMode = modeHeader || modeQuery || "default";
     const requestedX402 = resolvedMode === "x402";
 
-    // 3. Process sanitized payment token with distributed caching & retry resilience
+    // 3. Process sanitized payment token with concurrency control & distributed caching
     if (token) {
+      let lockResult = null;
+      const tokenHash = hashToken(token);
+
+      // Concurrency lock to prevent simultaneous execution with the same token
+      if (enableConcurrencyControl) {
+        lockResult = await acquireX402Lock(tokenHash, lockTtlMs, { redisClient });
+        if (!lockResult.acquired) {
+          x402LockContentionTotal.inc({ asset });
+          return res.status(409).json({
+            error: "x402 transaction in progress",
+            code: "X402_TRANSACTION_IN_PROGRESS",
+            retryAfter: 1,
+          });
+        }
+
+        // Ensure lock release on response completion or abort
+        let released = false;
+        const releaseLockOnce = () => {
+          if (released) return;
+          released = true;
+          releaseX402Lock(tokenHash, lockResult.token, { redisClient }).catch(() => {});
+        };
+        res.once("finish", releaseLockOnce);
+        res.once("close", releaseLockOnce);
+      }
+
       // Check cache first
       let cachedPayload = null;
       try {
