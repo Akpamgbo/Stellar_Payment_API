@@ -18,10 +18,13 @@ export function MerchantProfileDropdownSkeleton() {
   return (
     <div
       data-testid="merchant-dropdown-skeleton"
-      className="absolute right-0 z-50 mt-3 w-72 origin-top-right rounded-2xl border border-[#E8E8E8] bg-white p-5 shadow-[0_20px_50px_rgba(0,0,0,0.12)] animate-pulse"
+      className="fixed inset-x-0 bottom-0 z-50 w-full rounded-t-3xl border-t border-[#E8E8E8] bg-white p-5 shadow-2xl animate-pulse sm:absolute sm:inset-auto sm:right-0 sm:top-full sm:mt-3 sm:w-72 sm:origin-top-right sm:rounded-2xl sm:border sm:shadow-[0_20px_50px_rgba(0,0,0,0.12)]"
       role="status"
       aria-label="Loading profile details"
     >
+      <div className="flex justify-center pt-1 pb-3 sm:hidden" aria-hidden="true">
+        <div className="h-1.5 w-12 rounded-full bg-slate-300 dark:bg-slate-600" />
+      </div>
       <div className="mb-5 flex items-center gap-3.5 border-b border-[#F0F0F0] pb-5">
         <div className="h-[52px] w-[52px] rounded-full bg-slate-200" />
         <div className="min-w-0 flex-1 space-y-2">
@@ -48,6 +51,22 @@ export default function MerchantProfileDropdown({
 }: MerchantProfileDropdownProps) {
   const t = useTranslations("profileCard");
   const menuRef = useRef<HTMLDivElement>(null);
+  const touchStartY = useRef<number | null>(null);
+
+  // Touch gesture support for mobile drawer dismiss (#1667)
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartY.current = e.touches[0].clientY;
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartY.current === null) return;
+    const deltaY = e.changedTouches[0].clientY - touchStartY.current;
+    // Swipe down 50px+ dismisses the drawer on mobile
+    if (deltaY > 50) {
+      onClose();
+    }
+    touchStartY.current = null;
+  };
 
   // Close on Escape key and focus trap within menu
   useEffect(() => {
@@ -84,21 +103,32 @@ export default function MerchantProfileDropdown({
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 z-40 bg-black/10 backdrop-blur-[1px]"
+        className="fixed inset-0 z-40 bg-black/40 backdrop-blur-xs transition-opacity sm:bg-black/10 sm:backdrop-blur-[1px]"
         data-testid="merchant-profile-backdrop"
         onClick={onClose}
         aria-hidden="true"
       />
 
-      {/* Menu Panel */}
+      {/* Menu Panel / Responsive Drawer */}
       <div
         ref={menuRef}
         data-testid="merchant-profile-menu"
-        className="absolute right-0 z-50 mt-3 w-72 max-w-[calc(100vw-2rem)] origin-top-right rounded-2xl border border-[#E8E8E8] bg-white p-5 shadow-[0_20px_50px_rgba(0,0,0,0.12)] transition-all"
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+        className="fixed inset-x-0 bottom-0 z-50 w-full max-h-[85vh] overflow-y-auto rounded-t-3xl border-t border-[#E8E8E8] bg-white p-5 shadow-2xl transition-all sm:absolute sm:inset-auto sm:right-0 sm:top-full sm:mt-3 sm:w-72 sm:max-h-none sm:origin-top-right sm:rounded-2xl sm:border sm:shadow-[0_20px_50px_rgba(0,0,0,0.12)]"
         role="menu"
         aria-orientation="vertical"
         aria-label="Merchant Account Navigation"
       >
+        {/* Mobile Drag Handle Indicator */}
+        <div
+          className="flex justify-center pt-1 pb-3 sm:hidden"
+          data-testid="merchant-drawer-handle"
+          aria-hidden="true"
+        >
+          <div className="h-1.5 w-12 rounded-full bg-slate-300 dark:bg-slate-600" />
+        </div>
+
         {/* Profile Header */}
         <div className="mb-5 flex items-center gap-3.5 border-b border-[#F0F0F0] pb-5">
           <Avatar size={52} name={avatarName} src={logoUrl} />

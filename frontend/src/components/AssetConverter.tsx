@@ -2,6 +2,7 @@
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import * as StellarSdk from "stellar-sdk";
+import { toast } from "sonner";
 import { useWallet } from "@/lib/wallet-context";
 import { resolveAsset } from "@/lib/stellar";
 
@@ -15,7 +16,7 @@ interface PathRecord {
   path: Array<{ asset_type: string; asset_code?: string; asset_issuer?: string }>;
 }
 
-interface QuoteResult {
+export interface QuoteResult {
   sourceAsset: string;
   sourceAmount: string;
   destAsset: string;
@@ -23,6 +24,7 @@ interface QuoteResult {
   rate: string;
   path: string[];
   queriedAt: number;
+  isOptimistic?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -106,6 +108,7 @@ export default function AssetConverter({ onBack }: AssetConverterProps) {
   const { activeProvider } = useWallet();
   const firstInputRef = useRef<HTMLInputElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
+  const touchStartY = useRef<number | null>(null);
 
   // From fields
   const [fromCode, setFromCode] = useState("XLM");
@@ -122,6 +125,20 @@ export default function AssetConverter({ onBack }: AssetConverterProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<QuoteResult | null>(null);
+
+  // Touch gesture support for mobile drawer dismiss (#1662)
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartY.current = e.touches[0].clientY;
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartY.current === null) return;
+    const deltaY = e.changedTouches[0].clientY - touchStartY.current;
+    if (deltaY > 50) {
+      onBack();
+    }
+    touchStartY.current = null;
+  };
 
   // Focus first input on mount and trap focus
   useEffect(() => {
@@ -168,7 +185,7 @@ export default function AssetConverter({ onBack }: AssetConverterProps) {
     return null;
   }
 
-  /* ---------- query Horizon ---------- */
+  /* ---------- query Horizon with Optimistic Rollback (#1663) ---------- */
   const convert = useCallback(async () => {
     const validationError = validate();
     if (validationError) {
@@ -176,9 +193,27 @@ export default function AssetConverter({ onBack }: AssetConverterProps) {
       return;
     }
 
+    const previousResult = result;
     setLoading(true);
     setError(null);
-    setResult(null);
+
+    // Optimistic estimate while fetching path payment rate
+    const estimatedRate = previousResult ? previousResult.rate : "1.0000000";
+    const estimatedDestAmount = (Number(amount.trim()) * Number(estimatedRate)).toFixed(7);
+    const optimisticQuote: QuoteResult = {
+      sourceAsset: formatAssetLabel(fromCode, fromCode.toUpperCase() === "XLM" ? null : fromIssuer),
+      sourceAmount: amount.trim(),
+      destAsset: formatAssetLabel(toCode, toCode.toUpperCase() === "XLM" ? null : toIssuer),
+      destAmount: estimatedDestAmount,
+      rate: estimatedRate,
+      path: [
+        formatAssetLabel(fromCode, fromCode.toUpperCase() === "XLM" ? null : fromIssuer),
+        formatAssetLabel(toCode, toCode.toUpperCase() === "XLM" ? null : toIssuer),
+      ],
+      queriedAt: Date.now(),
+      isOptimistic: true,
+    };
+    setResult(optimisticQuote);
 
     try {
       const server = new StellarSdk.Horizon.Server(HORIZON_URL);
@@ -199,7 +234,11 @@ export default function AssetConverter({ onBack }: AssetConverterProps) {
       const records = response.records as PathRecord[];
 
       if (!records || records.length === 0) {
+        setResult(previousResult);
         setError("No conversion path available for this asset pair");
+        toast.error("No conversion path available for this asset pair", {
+          id: "asset-converter-no-path",
+        });
         return;
       }
 
@@ -226,22 +265,28 @@ export default function AssetConverter({ onBack }: AssetConverterProps) {
         rate,
         path: pathLabels,
         queriedAt: Date.now(),
+        isOptimistic: false,
       });
     } catch (err) {
-      if (err instanceof Error && err.message.includes("404")) {
-        setError("No conversion path available for this asset pair");
-      } else {
-        setError(
-          err instanceof Error
-            ? err.message
-            : "Horizon unavailable. Try again.",
-        );
-      }
+      // Optimistic state rollback upon network failure (#1663)
+      setResult(previousResult);
+      const errorMessage =
+        err instanceof Error && err.message.includes("404")
+          ? "No conversion path available for this asset pair"
+          : err instanceof Error
+          ? err.message
+          : "Horizon unavailable. Try again.";
+
+      setError(errorMessage);
+      toast.error("Network error: Conversion rolled back", {
+        description: errorMessage,
+        id: "asset-converter-network-failure",
+      });
     } finally {
       setLoading(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProvider, fromCode, fromIssuer, toCode, toIssuer, amount]);
+  }, [activeProvider, fromCode, fromIssuer, toCode, toIssuer, amount, result]);
 
   /* ---------- swap ---------- */
   function handleSwap() {
@@ -272,11 +317,24 @@ export default function AssetConverter({ onBack }: AssetConverterProps) {
     <div
       ref={modalRef}
       onKeyDown={handleKeyDown}
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
       role="dialog"
       aria-modal="true"
       aria-labelledby="asset-converter-title"
       aria-describedby="asset-converter-description"
+      data-testid="asset-converter-modal"
+      className="fixed inset-x-0 bottom-0 z-50 flex max-h-[90vh] w-full flex-col overflow-y-auto rounded-t-3xl border-t border-white/10 bg-slate-900/95 shadow-2xl backdrop-blur-xl sm:relative sm:inset-auto sm:max-h-none sm:rounded-xl sm:border sm:border-white/10 sm:bg-slate-900/90 sm:shadow-none"
     >
+      {/* Mobile Drag Handle Indicator (#1662) */}
+      <div
+        className="flex justify-center pt-3 pb-1 sm:hidden"
+        data-testid="asset-converter-drawer-handle"
+        aria-hidden="true"
+      >
+        <div className="h-1.5 w-12 rounded-full bg-white/20" />
+      </div>
+
       {/* ── Header ── */}
       <div className="flex items-center gap-3 border-b border-white/10 px-4 py-3">
         <button
@@ -475,6 +533,16 @@ export default function AssetConverter({ onBack }: AssetConverterProps) {
             aria-live="polite"
             aria-label="Conversion result"
           >
+            {/* Optimistic indicator badge */}
+            {result.isOptimistic && (
+              <div className="flex items-center justify-between border-b border-mint/10 pb-1.5 text-[11px] text-amber-300">
+                <span className="flex items-center gap-1 font-medium">
+                  <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" />
+                  Estimated Rate (Validating with network…)
+                </span>
+              </div>
+            )}
+
             {/* Rate headline */}
             <div className="flex items-baseline justify-between">
               <span className="text-xs font-medium uppercase tracking-wider text-slate-400">
