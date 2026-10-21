@@ -11,9 +11,11 @@
  *   4. Client retries with X-Payment-Token: <jwt> → gets access
  */
 
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import jwt from "jsonwebtoken";
+import client from "prom-client";
 import { logger } from "../lib/logger.js";
+import { connectRedisClient } from "../lib/redis.js";
 
 const USDC_ISSUER =
   process.env.USDC_ISSUER ||
@@ -50,6 +52,153 @@ export const MAX_TOKEN_LENGTH = 4096;
 /** Maximum length for memo prefix */
 export const MAX_MEMO_PREFIX_LENGTH = 20;
 
+/** Default token cache TTL in seconds */
+export const DEFAULT_TOKEN_CACHE_TTL_SEC = 300;
+
+// ---------------------------------------------------------------------------
+// Prometheus Telemetry & Metrics
+// ---------------------------------------------------------------------------
+
+function getOrCreateMetric(Type, config) {
+  const existing = client.register.getSingleMetric(config.name);
+  if (existing) return existing;
+  return new Type(config);
+}
+
+export const x402RequestsTotal = getOrCreateMetric(client.Counter, {
+  name: "x402_requests_total",
+  help: "Total number of requests handled by x402 middleware",
+  labelNames: ["status", "mode", "asset"],
+});
+
+export const x402VerificationDuration = getOrCreateMetric(client.Histogram, {
+  name: "x402_verification_duration_seconds",
+  help: "Time spent verifying x402 payment tokens in seconds",
+  labelNames: ["cache_status"],
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5],
+});
+
+export const x402CacheHitsTotal = getOrCreateMetric(client.Counter, {
+  name: "x402_cache_hits_total",
+  help: "Total number of x402 token cache hits",
+  labelNames: ["cache_type"],
+});
+
+export const x402CacheMissesTotal = getOrCreateMetric(client.Counter, {
+  name: "x402_cache_misses_total",
+  help: "Total number of x402 token cache misses",
+});
+
+export const x402ActiveChallenges = getOrCreateMetric(client.Gauge, {
+  name: "x402_active_challenges",
+  help: "Current number of active x402 payment challenges generated",
+});
+
+// In-memory token cache fallback: hash -> { payload, expiresAt }
+const memoryTokenCache = new Map();
+
+/**
+ * Reset caches and metrics for testing.
+ */
+export function resetX402CacheForTests() {
+  memoryTokenCache.clear();
+}
+
+/**
+ * Get internal telemetry summary for diagnostics.
+ */
+export function getX402Telemetry() {
+  return {
+    inMemoryCacheSize: memoryTokenCache.size,
+  };
+}
+
+/**
+ * Generate a SHA-256 hash for a token to safely use as a cache key.
+ *
+ * @param {string} token
+ * @returns {string} Hex hash string
+ */
+export function hashToken(token) {
+  return createHash("sha256").update(String(token)).digest("hex");
+}
+
+/**
+ * Retrieve cached token payload from Redis or in-memory fallback.
+ *
+ * @param {string} token
+ * @param {object} [opts]
+ * @param {object} [opts.redisClient]
+ * @returns {Promise<object|null>} Cached payload or null
+ */
+export async function getCachedToken(token, opts = {}) {
+  const tokenHash = hashToken(token);
+  const cacheKey = `x402:token_cache:${tokenHash}`;
+
+  // 1. Try Redis cache if client available
+  try {
+    const redis = opts.redisClient || (await connectRedisClient());
+    if (redis && redis.isOpen) {
+      const raw = await redis.get(cacheKey);
+      if (raw) {
+        x402CacheHitsTotal.inc({ cache_type: "redis" });
+        return JSON.parse(raw);
+      }
+    }
+  } catch (err) {
+    logger?.debug?.({ err: err.message }, "x402: redis get error, falling back to memory cache");
+  }
+
+  // 2. Check in-memory fallback cache
+  const local = memoryTokenCache.get(tokenHash);
+  if (local) {
+    if (local.expiresAt > Date.now()) {
+      x402CacheHitsTotal.inc({ cache_type: "memory" });
+      return local.payload;
+    }
+    memoryTokenCache.delete(tokenHash);
+  }
+
+  x402CacheMissesTotal.inc();
+  return null;
+}
+
+/**
+ * Store verified token payload in Redis and in-memory cache.
+ *
+ * @param {string} token
+ * @param {object} payload
+ * @param {object} [opts]
+ * @param {object} [opts.redisClient]
+ * @param {number} [opts.ttlSec]
+ */
+export async function setCachedToken(token, payload, opts = {}) {
+  const tokenHash = hashToken(token);
+  const cacheKey = `x402:token_cache:${tokenHash}`;
+
+  let ttl = opts.ttlSec || DEFAULT_TOKEN_CACHE_TTL_SEC;
+  if (payload?.exp && typeof payload.exp === "number") {
+    const remaining = payload.exp - Math.floor(Date.now() / 1000);
+    ttl = Math.max(1, Math.min(remaining, ttl));
+  }
+
+  // Set in in-memory fallback cache
+  memoryTokenCache.set(tokenHash, {
+    payload,
+    expiresAt: Date.now() + ttl * 1000,
+  });
+
+  // Set in Redis
+  try {
+    const redis = opts.redisClient || (await connectRedisClient());
+    if (redis && redis.isOpen) {
+      await redis.set(cacheKey, JSON.stringify(payload), { EX: ttl });
+    }
+  } catch (err) {
+    logger?.debug?.({ err: err.message }, "x402: redis set error, cached in-memory only");
+  }
+}
+
 /**
  * Validate and sanitize x402 middleware configuration.
  *
@@ -68,6 +217,8 @@ export function validateX402Config(config) {
     plutoVerifyUrl = `${process.env.PAYMENT_LINK_BASE?.replace(":3000", ":4000") || "http://localhost:4000"}/api/verify-x402`,
     memo_prefix = "x402",
     enforceByDefault = false,
+    redisClient = null,
+    cacheTtlSec = DEFAULT_TOKEN_CACHE_TTL_SEC,
   } = config;
 
   // Validate amount
@@ -143,6 +294,8 @@ export function validateX402Config(config) {
     plutoVerifyUrl: cleanVerifyUrl,
     memo_prefix: cleanMemoPrefix,
     enforceByDefault: Boolean(enforceByDefault),
+    redisClient,
+    cacheTtlSec: Number.isFinite(cacheTtlSec) && cacheTtlSec > 0 ? cacheTtlSec : DEFAULT_TOKEN_CACHE_TTL_SEC,
   };
 }
 
@@ -207,7 +360,8 @@ export function generatePaymentMemo(prefix, requestId) {
 }
 
 /**
- * Create x402 middleware with comprehensive input validation and sanitization.
+ * Create x402 middleware with comprehensive input validation, distributed Redis caching,
+ * and throughput telemetry.
  *
  * @param {object} config
  * @param {string} config.amount          - USDC amount required (e.g. "0.01")
@@ -216,6 +370,8 @@ export function generatePaymentMemo(prefix, requestId) {
  * @param {string} [config.plutoVerifyUrl] - URL of /api/verify-x402
  * @param {string} [config.memo_prefix]   - Memo prefix, defaults to "x402"
  * @param {boolean} [config.enforceByDefault] - If true, always challenge when token is absent
+ * @param {object} [config.redisClient]   - Injected Redis client
+ * @param {number} [config.cacheTtlSec]   - TTL for cached tokens in seconds
  */
 export function x402Middleware(config) {
   const validatedConfig = validateX402Config(config);
@@ -226,6 +382,8 @@ export function x402Middleware(config) {
     plutoVerifyUrl,
     memo_prefix,
     enforceByDefault,
+    redisClient,
+    cacheTtlSec,
   } = validatedConfig;
 
   const jwtSecret = process.env.X402_JWT_SECRET;
@@ -233,7 +391,9 @@ export function x402Middleware(config) {
     throw new Error("X402_JWT_SECRET env variable is required for x402 middleware");
   }
 
-  return function requirePayment(req, res, next) {
+  return async function requirePayment(req, res, next) {
+    const startTime = process.hrtime.bigint();
+
     // 1. Sanitize payment token
     const rawToken = req.headers["x-payment-token"];
     let token = null;
@@ -251,12 +411,37 @@ export function x402Middleware(config) {
     // 2. Sanitize and validate pricing mode from header and query
     const modeHeader = sanitizePricingMode(req.headers["x-pluto-pricing-mode"]);
     const modeQuery = sanitizePricingMode(req.query?.pricing_mode);
-    const requestedX402 = modeHeader === "x402" || modeQuery === "x402";
+    const resolvedMode = modeHeader || modeQuery || "default";
+    const requestedX402 = resolvedMode === "x402";
 
-    // 3. Process sanitized payment token
+    // 3. Process sanitized payment token with distributed caching
     if (token) {
+      // Check cache first
+      let cachedPayload = null;
+      try {
+        cachedPayload = await getCachedToken(token, { redisClient });
+      } catch (err) {
+        logger?.debug?.({ err: err.message }, "x402: cache lookup error");
+      }
+
+      if (cachedPayload) {
+        const durationSec = Number(process.hrtime.bigint() - startTime) / 1e9;
+        x402VerificationDuration.observe({ cache_status: "hit" }, durationSec);
+        x402RequestsTotal.inc({ status: "verified_cache", mode: resolvedMode, asset });
+
+        req.x402 = cachedPayload;
+        return next();
+      }
+
+      // Fresh verification on cache miss
       try {
         const payload = jwt.verify(token, jwtSecret);
+        await setCachedToken(token, payload, { redisClient, ttlSec: cacheTtlSec });
+
+        const durationSec = Number(process.hrtime.bigint() - startTime) / 1e9;
+        x402VerificationDuration.observe({ cache_status: "miss" }, durationSec);
+        x402RequestsTotal.inc({ status: "verified_fresh", mode: resolvedMode, asset });
+
         req.x402 = payload;
         return next();
       } catch (err) {
@@ -264,6 +449,7 @@ export function x402Middleware(config) {
           { err: err.message },
           "x402: payment token verification failed or expired"
         );
+        x402RequestsTotal.inc({ status: "invalid_token", mode: resolvedMode, asset });
         // Token invalid or expired — fall through to 402 challenge
       }
     }
@@ -272,12 +458,16 @@ export function x402Middleware(config) {
     // - Subscription/API-key mode: pass through
     // - x402 mode: challenge with 402
     if (!enforceByDefault && !requestedX402) {
+      x402RequestsTotal.inc({ status: "passed_through", mode: resolvedMode, asset });
       return next();
     }
 
-    // 4. Generate sanitized memo
+    // 4. Generate sanitized memo and challenge
     const requestId = randomUUID().replace(/-/g, "");
     const memo = generatePaymentMemo(memo_prefix, requestId);
+
+    x402ActiveChallenges.inc();
+    x402RequestsTotal.inc({ status: "challenged", mode: resolvedMode, asset });
 
     return res.status(402).json({
       x402: true,
