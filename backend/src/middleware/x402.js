@@ -94,14 +94,275 @@ export const x402ActiveChallenges = getOrCreateMetric(client.Gauge, {
   help: "Current number of active x402 payment challenges generated",
 });
 
-// In-memory token cache fallback: hash -> { payload, expiresAt }
+export const x402DlqEnqueuedTotal = getOrCreateMetric(client.Counter, {
+  name: "x402_dlq_enqueued_total",
+  help: "Total number of failed x402 operations routed to Dead-Letter Queue",
+  labelNames: ["operation_type"],
+});
+
+export const x402DlqRecoveredTotal = getOrCreateMetric(client.Counter, {
+  name: "x402_dlq_recovered_total",
+  help: "Total number of x402 Dead-Letter Queue operations successfully recovered",
+  labelNames: ["operation_type"],
+});
+
+export const x402DlqExhaustedTotal = getOrCreateMetric(client.Counter, {
+  name: "x402_dlq_exhausted_total",
+  help: "Total number of x402 Dead-Letter Queue operations exhausted (poison pills)",
+  labelNames: ["operation_type"],
+});
+
+export const x402DlqSize = getOrCreateMetric(client.Gauge, {
+  name: "x402_dlq_size",
+  help: "Current number of pending items in x402 Dead-Letter Queue",
+});
+
+// ---------------------------------------------------------------------------
+// Dead-Letter Queue (DLQ) & Retry Logic
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_DLQ_RETRY_OPTIONS = Object.freeze({
+  maxAttempts: 3,
+  baseDelayMs: 50,
+  maxDelayMs: 1000,
+  maxDlqRetries: 5,
+});
+
+export const RETRYABLE_X402_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ECONNABORTED",
+  "ETIMEDOUT",
+  "EPIPE",
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+]);
+
+/** In-memory fallback DLQ store: itemId -> DLQ entry */
+const memoryDlq = new Map();
+
+/** In-memory token cache fallback: hash -> { payload, expiresAt } */
 const memoryTokenCache = new Map();
 
 /**
- * Reset caches and metrics for testing.
+ * Check if an error is considered transient and safe to retry.
+ *
+ * @param {Error|any} err
+ * @returns {boolean}
+ */
+export function isRetryableX402Error(err) {
+  if (!err) return false;
+  if (err.isRetryable === true) return true;
+  if (err.code && RETRYABLE_X402_ERROR_CODES.has(err.code)) return true;
+  const msg = String(err.message || "").toLowerCase();
+  return (
+    msg.includes("timeout") ||
+    msg.includes("network") ||
+    msg.includes("econnreset") ||
+    msg.includes("redis connection") ||
+    msg.includes("transient")
+  );
+}
+
+/**
+ * Execute an operation with exponential backoff and jitter.
+ *
+ * @param {Function} fn - Async operation to execute: (attempt) => Promise<any>
+ * @param {object} [opts]
+ * @param {number} [opts.maxAttempts=3]
+ * @param {number} [opts.baseDelayMs=50]
+ * @param {number} [opts.maxDelayMs=1000]
+ * @returns {Promise<any>}
+ */
+export async function executeWithRetry(fn, opts = {}) {
+  const maxAttempts = opts.maxAttempts ?? DEFAULT_DLQ_RETRY_OPTIONS.maxAttempts;
+  const baseDelayMs = opts.baseDelayMs ?? DEFAULT_DLQ_RETRY_OPTIONS.baseDelayMs;
+  const maxDelayMs = opts.maxDelayMs ?? DEFAULT_DLQ_RETRY_OPTIONS.maxDelayMs;
+
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn(attempt);
+    } catch (err) {
+      lastError = err;
+      if (attempt >= maxAttempts || !isRetryableX402Error(err)) {
+        throw err;
+      }
+      const expDelay = Math.min(
+        maxDelayMs,
+        baseDelayMs * Math.pow(2, attempt - 1)
+      );
+      const jitter = Math.random() * expDelay;
+      await new Promise((resolve) => setTimeout(resolve, jitter));
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Enqueue a failed operation into the Dead-Letter Queue.
+ *
+ * @param {object} item
+ * @param {string} item.operationType
+ * @param {any} item.payload
+ * @param {Error|any} item.error
+ * @param {object} [opts]
+ * @param {object} [opts.redisClient]
+ * @returns {Promise<string>} Dead letter item ID
+ */
+export async function enqueueDeadLetter(item, opts = {}) {
+  const id = item.id || randomUUID();
+  const now = Date.now();
+  const entry = {
+    id,
+    operationType: item.operationType || "generic_x402_operation",
+    payload: item.payload,
+    error: {
+      message: item.error?.message || String(item.error),
+      code: item.error?.code,
+    },
+    attempts: 1,
+    status: "pending",
+    firstFailedAt: now,
+    lastFailedAt: now,
+    nextRetryAt: now + (opts.baseDelayMs || 500),
+  };
+
+  // 1. In-memory store
+  memoryDlq.set(id, entry);
+
+  // 2. Redis store if available
+  try {
+    const redis = opts.redisClient || (await connectRedisClient());
+    if (redis && redis.isOpen) {
+      await redis.set(`x402:dlq:${id}`, JSON.stringify(entry), { EX: 86400 });
+    }
+  } catch (err) {
+    logger?.debug?.({ err: err.message }, "x402: redis dlq set error, stored in-memory");
+  }
+
+  x402DlqEnqueuedTotal.inc({ operation_type: entry.operationType });
+  x402DlqSize.set(memoryDlq.size);
+
+  logger?.warn?.(
+    { dlqId: id, operationType: entry.operationType, err: entry.error.message },
+    "x402: operation routed to dead-letter queue"
+  );
+
+  return id;
+}
+
+/**
+ * Recover pending items from the Dead-Letter Queue.
+ *
+ * @param {object} opts
+ * @param {Function} opts.handler - (entry) => Promise<boolean|void>
+ * @param {object} [opts.redisClient]
+ * @param {number} [opts.maxBatchSize=10]
+ * @param {number} [opts.maxDlqRetries=5]
+ * @returns {Promise<{ recovered: number, failed: number, exhausted: number }>}
+ */
+export async function recoverDeadLetterQueue(opts = {}) {
+  const {
+    handler,
+    redisClient = null,
+    maxBatchSize = 10,
+    maxDlqRetries = DEFAULT_DLQ_RETRY_OPTIONS.maxDlqRetries,
+  } = opts;
+
+  let recovered = 0;
+  let failed = 0;
+  let exhausted = 0;
+  const now = Date.now();
+
+  const entriesToProcess = [];
+  for (const entry of memoryDlq.values()) {
+    if (entry.status === "pending" && entry.nextRetryAt <= now) {
+      entriesToProcess.push(entry);
+      if (entriesToProcess.length >= maxBatchSize) break;
+    }
+  }
+
+  for (const entry of entriesToProcess) {
+    try {
+      if (handler) {
+        await handler(entry);
+      }
+      // Successful recovery
+      entry.status = "recovered";
+      memoryDlq.delete(entry.id);
+
+      try {
+        const redis = redisClient || (await connectRedisClient());
+        if (redis && redis.isOpen) {
+          await redis.del(`x402:dlq:${entry.id}`);
+        }
+      } catch {}
+
+      x402DlqRecoveredTotal.inc({ operation_type: entry.operationType });
+      recovered++;
+      logger?.info?.({ dlqId: entry.id }, "x402: dlq entry recovered successfully");
+    } catch (err) {
+      entry.attempts++;
+      entry.lastFailedAt = Date.now();
+      entry.error = { message: err.message, code: err.code };
+
+      if (entry.attempts >= maxDlqRetries) {
+        entry.status = "exhausted";
+        x402DlqExhaustedTotal.inc({ operation_type: entry.operationType });
+        exhausted++;
+        logger?.error?.(
+          { dlqId: entry.id, attempts: entry.attempts },
+          "x402: dlq entry exceeded max retries, marked as exhausted poison pill"
+        );
+      } else {
+        // Back off exponentially for next recovery
+        const backoffMs = Math.min(60000, 1000 * Math.pow(2, entry.attempts));
+        entry.nextRetryAt = Date.now() + backoffMs;
+        failed++;
+      }
+    }
+  }
+
+  x402DlqSize.set(memoryDlq.size);
+  return { recovered, failed, exhausted };
+}
+
+/**
+ * Get current stats of Dead-Letter Queue.
+ *
+ * @returns {object}
+ */
+export function getDeadLetterQueueStats() {
+  let pending = 0;
+  let exhausted = 0;
+  for (const entry of memoryDlq.values()) {
+    if (entry.status === "pending") pending++;
+    if (entry.status === "exhausted") exhausted++;
+  }
+  return {
+    total: memoryDlq.size,
+    pending,
+    exhausted,
+  };
+}
+
+/**
+ * Clear the Dead-Letter Queue (for tests or manual cleanup).
+ */
+export function clearDeadLetterQueue() {
+  memoryDlq.clear();
+  x402DlqSize.set(0);
+}
+
+/**
+ * Reset caches, DLQ, and metrics for testing.
  */
 export function resetX402CacheForTests() {
   memoryTokenCache.clear();
+  clearDeadLetterQueue();
 }
 
 /**
@@ -110,6 +371,7 @@ export function resetX402CacheForTests() {
 export function getX402Telemetry() {
   return {
     inMemoryCacheSize: memoryTokenCache.size,
+    dlqStats: getDeadLetterQueueStats(),
   };
 }
 
@@ -164,7 +426,7 @@ export async function getCachedToken(token, opts = {}) {
 }
 
 /**
- * Store verified token payload in Redis and in-memory cache.
+ * Store verified token payload in Redis and in-memory cache with retry and DLQ resilience.
  *
  * @param {string} token
  * @param {object} payload
@@ -182,20 +444,27 @@ export async function setCachedToken(token, payload, opts = {}) {
     ttl = Math.max(1, Math.min(remaining, ttl));
   }
 
-  // Set in in-memory fallback cache
+  // Set in in-memory fallback cache immediately
   memoryTokenCache.set(tokenHash, {
     payload,
     expiresAt: Date.now() + ttl * 1000,
   });
 
-  // Set in Redis
+  // Set in Redis with retry and DLQ fallback
   try {
-    const redis = opts.redisClient || (await connectRedisClient());
-    if (redis && redis.isOpen) {
-      await redis.set(cacheKey, JSON.stringify(payload), { EX: ttl });
-    }
+    await executeWithRetry(async () => {
+      const redis = opts.redisClient || (await connectRedisClient());
+      if (redis && redis.isOpen) {
+        await redis.set(cacheKey, JSON.stringify(payload), { EX: ttl });
+      }
+    }, { maxAttempts: 2, baseDelayMs: 20 });
   } catch (err) {
-    logger?.debug?.({ err: err.message }, "x402: redis set error, cached in-memory only");
+    logger?.debug?.({ err: err.message }, "x402: redis set failed after retries, routing to DLQ");
+    await enqueueDeadLetter({
+      operationType: "cache_token_set",
+      payload: { tokenHash, ttl },
+      error: err,
+    }, opts);
   }
 }
 
@@ -219,6 +488,7 @@ export function validateX402Config(config) {
     enforceByDefault = false,
     redisClient = null,
     cacheTtlSec = DEFAULT_TOKEN_CACHE_TTL_SEC,
+    dlqOptions = null,
   } = config;
 
   // Validate amount
@@ -296,6 +566,7 @@ export function validateX402Config(config) {
     enforceByDefault: Boolean(enforceByDefault),
     redisClient,
     cacheTtlSec: Number.isFinite(cacheTtlSec) && cacheTtlSec > 0 ? cacheTtlSec : DEFAULT_TOKEN_CACHE_TTL_SEC,
+    dlqOptions: dlqOptions || DEFAULT_DLQ_RETRY_OPTIONS,
   };
 }
 
@@ -361,7 +632,7 @@ export function generatePaymentMemo(prefix, requestId) {
 
 /**
  * Create x402 middleware with comprehensive input validation, distributed Redis caching,
- * and throughput telemetry.
+ * throughput telemetry, automated retry logic, and Dead-Letter Queue (DLQ) recovery.
  *
  * @param {object} config
  * @param {string} config.amount          - USDC amount required (e.g. "0.01")
@@ -372,6 +643,7 @@ export function generatePaymentMemo(prefix, requestId) {
  * @param {boolean} [config.enforceByDefault] - If true, always challenge when token is absent
  * @param {object} [config.redisClient]   - Injected Redis client
  * @param {number} [config.cacheTtlSec]   - TTL for cached tokens in seconds
+ * @param {object} [config.dlqOptions]    - DLQ retry and recovery configuration
  */
 export function x402Middleware(config) {
   const validatedConfig = validateX402Config(config);
@@ -414,7 +686,7 @@ export function x402Middleware(config) {
     const resolvedMode = modeHeader || modeQuery || "default";
     const requestedX402 = resolvedMode === "x402";
 
-    // 3. Process sanitized payment token with distributed caching
+    // 3. Process sanitized payment token with distributed caching & retry resilience
     if (token) {
       // Check cache first
       let cachedPayload = null;

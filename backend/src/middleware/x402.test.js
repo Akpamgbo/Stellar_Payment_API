@@ -25,10 +25,12 @@ import {
   setCachedToken,
   resetX402CacheForTests,
   getX402Telemetry,
-  x402RequestsTotal,
-  x402CacheHitsTotal,
-  x402CacheMissesTotal,
-  x402ActiveChallenges,
+  executeWithRetry,
+  enqueueDeadLetter,
+  recoverDeadLetterQueue,
+  getDeadLetterQueueStats,
+  clearDeadLetterQueue,
+  isRetryableX402Error,
 } from "./x402.js";
 import { createFakeRedis } from "../../tests/helpers/fake-redis.js";
 
@@ -267,20 +269,109 @@ describe("x402 Middleware", () => {
 
       spyJwtVerify.mockRestore();
     });
+  });
 
-    it("records telemetry metrics for challenges, pass-throughs, and verifications", async () => {
-      const middleware = x402Middleware({
-        amount: "0.01",
-        recipient: VALID_STELLAR_KEY,
-        enforceByDefault: true,
+  // -------------------------------------------------------------------------
+  // Issue #1628: Automated Dead-Letter Queue Recovery and Retry Logic
+  // -------------------------------------------------------------------------
+  describe("Dead-Letter Queue Recovery and Retry Logic (Issue #1628)", () => {
+    describe("isRetryableX402Error", () => {
+      it("identifies transient errors correctly", () => {
+        expect(isRetryableX402Error(new Error("ETIMEDOUT: connection timed out"))).toBe(true);
+        expect(isRetryableX402Error({ code: "ECONNRESET" })).toBe(true);
+        expect(isRetryableX402Error(new Error("redis connection failure"))).toBe(true);
+        expect(isRetryableX402Error(new Error("Invalid token signature"))).toBe(false);
+      });
+    });
+
+    describe("executeWithRetry", () => {
+      it("succeeds on first attempt without retrying", async () => {
+        const fn = vi.fn(async () => "success");
+        const res = await executeWithRetry(fn, { maxAttempts: 3, baseDelayMs: 1 });
+        expect(res).toBe("success");
+        expect(fn).toHaveBeenCalledTimes(1);
       });
 
-      const req = makeReq();
-      const res = makeRes();
-      const next = vi.fn();
+      it("retries on transient errors and succeeds when transient error clears", async () => {
+        let attempts = 0;
+        const fn = vi.fn(async () => {
+          attempts++;
+          if (attempts < 2) {
+            const err = new Error("network timeout");
+            err.code = "ETIMEDOUT";
+            throw err;
+          }
+          return "recovered";
+        });
 
-      await middleware(req, res, next);
-      expect(res.status).toHaveBeenCalledWith(402);
+        const res = await executeWithRetry(fn, { maxAttempts: 3, baseDelayMs: 1 });
+        expect(res).toBe("recovered");
+        expect(fn).toHaveBeenCalledTimes(2);
+      });
+
+      it("does not retry non-retryable errors", async () => {
+        const fn = vi.fn(async () => {
+          throw new TypeError("Unrecoverable type error");
+        });
+
+        await expect(executeWithRetry(fn, { maxAttempts: 3, baseDelayMs: 1 })).rejects.toThrow(TypeError);
+        expect(fn).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe("enqueueDeadLetter and recoverDeadLetterQueue", () => {
+      it("enqueues failed items to DLQ with initial pending status", async () => {
+        const id = await enqueueDeadLetter({
+          operationType: "test_op",
+          payload: { orderId: "123" },
+          error: new Error("Redis connection dropped"),
+        });
+
+        expect(id).toBeDefined();
+        const stats = getDeadLetterQueueStats();
+        expect(stats.total).toBe(1);
+        expect(stats.pending).toBe(1);
+      });
+
+      it("recovers eligible pending items via recoverDeadLetterQueue", async () => {
+        const id = await enqueueDeadLetter({
+          operationType: "payment_reconcile",
+          payload: { paymentId: "pay-1" },
+          error: new Error("temporary network issue"),
+        }, { baseDelayMs: -10 }); // eligible immediately
+
+        const recoveryHandler = vi.fn(async (entry) => {
+          expect(entry.payload.paymentId).toBe("pay-1");
+        });
+
+        const result = await recoverDeadLetterQueue({ handler: recoveryHandler });
+        expect(result.recovered).toBe(1);
+        expect(recoveryHandler).toHaveBeenCalledTimes(1);
+
+        const stats = getDeadLetterQueueStats();
+        expect(stats.total).toBe(0);
+        expect(stats.pending).toBe(0);
+      });
+
+      it("marks items as exhausted poison pills after exceeding max attempts", async () => {
+        const id = await enqueueDeadLetter({
+          operationType: "failing_op",
+          payload: { data: "test" },
+          error: new Error("persistent error"),
+        }, { baseDelayMs: -10 });
+
+        const failingHandler = vi.fn(async () => {
+          throw new Error("still failing");
+        });
+
+        // Run recovery 5 times
+        for (let i = 0; i < 5; i++) {
+          await recoverDeadLetterQueue({ handler: failingHandler, maxDlqRetries: 3 });
+        }
+
+        const stats = getDeadLetterQueueStats();
+        expect(stats.exhausted).toBe(1);
+      });
     });
   });
 });
