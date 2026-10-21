@@ -264,6 +264,90 @@ describe("MerchantProfileCard", () => {
     });
   });
 
+  // ── 3. Responsive Drawer View and Touch Gestures (#1667) ─────────────────────
+  describe("Responsive Drawer View and Touch Gestures", () => {
+    it("renders drawer drag handle with hidden class on sm breakpoint", async () => {
+      render(<MerchantProfileCard />);
+      const trigger = screen.getByTestId("merchant-profile-trigger");
+      await act(async () => {
+        fireEvent.click(trigger);
+      });
+
+      const handle = await screen.findByTestId("merchant-drawer-handle");
+      expect(handle).toBeInTheDocument();
+      expect(handle).toHaveClass("sm:hidden");
+    });
+
+    it("closes drawer on swipe down gesture (>50px delta)", async () => {
+      render(<MerchantProfileCard />);
+      const trigger = screen.getByTestId("merchant-profile-trigger");
+      await act(async () => {
+        fireEvent.click(trigger);
+      });
+
+      const menu = await screen.findByTestId("merchant-profile-menu");
+      fireEvent.touchStart(menu, {
+        touches: [{ clientY: 100 }],
+      });
+      fireEvent.touchEnd(menu, {
+        changedTouches: [{ clientY: 160 }],
+      });
+
+      expect(screen.queryByTestId("merchant-profile-menu")).not.toBeInTheDocument();
+    });
+
+    it("does not close drawer on small swipe movement (<=50px delta)", async () => {
+      render(<MerchantProfileCard />);
+      const trigger = screen.getByTestId("merchant-profile-trigger");
+      await act(async () => {
+        fireEvent.click(trigger);
+      });
+
+      const menu = await screen.findByTestId("merchant-profile-menu");
+      fireEvent.touchStart(menu, {
+        touches: [{ clientY: 100 }],
+      });
+      fireEvent.touchEnd(menu, {
+        changedTouches: [{ clientY: 130 }],
+      });
+
+      expect(screen.getByTestId("merchant-profile-menu")).toBeInTheDocument();
+    });
+
+    it("does not close on swipe up gesture (negative delta)", async () => {
+      render(<MerchantProfileCard />);
+      const trigger = screen.getByTestId("merchant-profile-trigger");
+      await act(async () => {
+        fireEvent.click(trigger);
+      });
+
+      const menu = await screen.findByTestId("merchant-profile-menu");
+      fireEvent.touchStart(menu, {
+        touches: [{ clientY: 200 }],
+      });
+      fireEvent.touchEnd(menu, {
+        changedTouches: [{ clientY: 120 }],
+      });
+
+      expect(screen.getByTestId("merchant-profile-menu")).toBeInTheDocument();
+    });
+
+    it("ignores touchEnd if touchStart was never fired", async () => {
+      render(<MerchantProfileCard />);
+      const trigger = screen.getByTestId("merchant-profile-trigger");
+      await act(async () => {
+        fireEvent.click(trigger);
+      });
+
+      const menu = await screen.findByTestId("merchant-profile-menu");
+      fireEvent.touchEnd(menu, {
+        changedTouches: [{ clientY: 200 }],
+      });
+
+      expect(screen.getByTestId("merchant-profile-menu")).toBeInTheDocument();
+    });
+  });
+
   // ── 3. Accessibility (WCAG 2.1 AA) & Keyboard Navigation ───────────────────
   describe("Accessibility (WCAG 2.1 AA) & Keyboard Navigation", () => {
     it("has correct ARIA semantics on menu and items", async () => {

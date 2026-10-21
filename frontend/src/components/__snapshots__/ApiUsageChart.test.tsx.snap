@@ -1,0 +1,210 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ApiUsageChart Component > Snapshot Tests > matches snapshot during loading state 1`] = `
+<div>
+  <div
+    class="rounded-xl border border-white/10 bg-white/5 p-6"
+  >
+    <div
+      class="flex items-center justify-center py-12"
+    >
+      <div
+        class="h-8 w-8 animate-spin rounded-full border-2 border-mint border-t-transparent"
+      />
+    </div>
+  </div>
+</div>
+`;
+
+exports[`ApiUsageChart Component > Snapshot Tests > matches snapshot on desktop populated state 1`] = `
+<div>
+  <div
+    class="min-w-0 rounded-xl border border-white/10 bg-white/5 p-4 sm:p-6"
+  >
+    <div
+      class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
+    >
+      <div>
+        <h3
+          class="text-lg font-semibold text-white"
+        >
+          API Usage - Last 7 Days
+        </h3>
+        <p
+          class="text-sm text-slate-400"
+        >
+          Total requests: 
+          2,000
+        </p>
+      </div>
+    </div>
+    <div
+      class="-mx-2 sm:mx-0"
+    >
+      <div
+        data-height="300"
+        data-testid="responsive-container"
+        data-width="100%"
+      >
+        <div
+          data-margin="{"top":8,"right":16,"left":-8,"bottom":8}"
+          data-points="7"
+          data-testid="bar-chart"
+        >
+          <div
+            data-testid="cartesian-grid"
+          />
+          <div
+            data-fontsize="12px"
+            data-key="date"
+            data-mintickgap="16"
+            data-testid="x-axis"
+          />
+          <div
+            data-fontsize="12px"
+            data-testid="y-axis"
+            data-width="44"
+          />
+          <div
+            data-testid="tooltip"
+          />
+          <div
+            data-fill="#5ef2c0"
+            data-key="requests"
+            data-maxbarsize="32"
+            data-testid="bar"
+          />
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`ApiUsageChart Component > Snapshot Tests > matches snapshot on empty data state 1`] = `
+<div>
+  <div
+    class="min-w-0 rounded-xl border border-white/10 bg-white/5 p-4 sm:p-6"
+  >
+    <div
+      class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
+    >
+      <div>
+        <h3
+          class="text-lg font-semibold text-white"
+        >
+          API Usage - Last 7 Days
+        </h3>
+        <p
+          class="text-sm text-slate-400"
+        >
+          Total requests: 
+          0
+        </p>
+      </div>
+    </div>
+    <div
+      class="flex items-center justify-center py-12"
+    >
+      <p
+        class="text-sm text-slate-400"
+      >
+        No API usage data available
+      </p>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`ApiUsageChart Component > Snapshot Tests > matches snapshot on error state 1`] = `
+<div>
+  <div
+    class="rounded-xl border border-red-500/30 bg-red-500/10 p-6"
+  >
+    <p
+      class="text-sm text-red-300"
+    >
+      Failed to fetch usage data: 500
+    </p>
+  </div>
+</div>
+`;
+
+exports[`ApiUsageChart Component > Snapshot Tests > matches snapshot on mobile compact populated state 1`] = `
+<div>
+  <div
+    class="min-w-0 rounded-xl border border-white/10 bg-white/5 p-4 sm:p-6"
+  >
+    <div
+      class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
+    >
+      <div>
+        <h3
+          class="text-lg font-semibold text-white"
+        >
+          API Usage - Last 7 Days
+        </h3>
+        <p
+          class="text-sm text-slate-400"
+        >
+          Total requests: 
+          2,000
+        </p>
+      </div>
+    </div>
+    <div
+      class="-mx-2 sm:mx-0"
+    >
+      <div
+        data-height="240"
+        data-testid="responsive-container"
+        data-width="100%"
+      >
+        <div
+          data-margin="{"top":8,"right":8,"left":-20,"bottom":0}"
+          data-points="7"
+          data-testid="bar-chart"
+        >
+          <div
+            data-testid="cartesian-grid"
+          />
+          <div
+            data-fontsize="10px"
+            data-key="date"
+            data-mintickgap="28"
+            data-testid="x-axis"
+          />
+          <div
+            data-fontsize="10px"
+            data-testid="y-axis"
+            data-width="32"
+          />
+          <div
+            data-testid="tooltip"
+          />
+          <div
+            data-fill="#5ef2c0"
+            data-key="requests"
+            data-maxbarsize="22"
+            data-testid="bar"
+          />
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`ApiUsageChart Component > Snapshot Tests > matches snapshot when unauthenticated 1`] = `
+<div>
+  <div
+    class="rounded-xl border border-white/10 bg-white/5 p-6"
+  >
+    <p
+      class="text-sm text-slate-400"
+    >
+      Register or log in to view API usage statistics.
+    </p>
+  </div>
+</div>
+`;
